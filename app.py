@@ -23,6 +23,7 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 
 import j2534
+import runtime_validation
 from product import APP_NAME, VERSION, COPYRIGHT, PRODUCT_DESCRIPTION
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,7 +32,9 @@ USER_DATA_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", SOURCE_DIR), "4G1 Live"
 )
 LOG_DIR = os.path.join(USER_DATA_DIR, "Logs")
+DIAGNOSTIC_LOG_PATH = os.path.join(LOG_DIR, "4g1-live.log")
 SETTINGS_PATH = os.path.join(USER_DATA_DIR, "settings.json")
+SETTINGS_BACKUP_PATH = SETTINGS_PATH + ".bak"
 LEGACY_SETTINGS_PATH = os.path.join(SOURCE_DIR, "settings.json")
 ICON_PATH = os.path.join(APP_DIR, "4g1.ico")          # window / taskbar (.ico)
 LOGO_PATH = os.path.join(APP_DIR, "4g1_logo.png")     # settings brand preview
@@ -44,7 +47,7 @@ def _configure_logging():
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         logging.basicConfig(
-            filename=os.path.join(LOG_DIR, "4g1-live.log"),
+            filename=DIAGNOSTIC_LOG_PATH,
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
         )
@@ -197,31 +200,38 @@ DEFAULTS = dict(
 
 
 def load_settings():
-    s = dict(DEFAULTS)
-    for path in (SETTINGS_PATH, LEGACY_SETTINGS_PATH):
-        try:
-            with open(path, encoding="utf-8") as f:
-                s.update(json.load(f))
-            break
-        except FileNotFoundError:
-            continue
-        except Exception:
-            logging.exception("Could not read settings from %s", path)
-    # migrate / clamp unknown profile ids to primary 4G15 12V
-    if s.get("vehicle_profile") not in j2534.VEHICLE_PROFILES:
-        s["vehicle_profile"] = j2534.DEFAULT_PROFILE_ID
-    return s
+    return runtime_validation.load_settings(
+        paths=dict(
+            settings=SETTINGS_PATH,
+            backup=SETTINGS_BACKUP_PATH,
+            legacy=LEGACY_SETTINGS_PATH,
+        ),
+        defaults=DEFAULTS,
+        themes=THEMES,
+        gauge_styles=GAUGE_STYLES,
+    )
 
 
 def save_settings(s):
-    try:
-        os.makedirs(USER_DATA_DIR, exist_ok=True)
-        temp_path = SETTINGS_PATH + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(s, f, indent=2)
-        os.replace(temp_path, SETTINGS_PATH)
-    except Exception:
-        logging.exception("Could not save settings")
+    return runtime_validation.save_settings(
+        s,
+        paths=dict(
+            settings=SETTINGS_PATH,
+            backup=SETTINGS_BACKUP_PATH,
+            user_data_dir=USER_DATA_DIR,
+        ),
+        defaults=DEFAULTS,
+        themes=THEMES,
+        gauge_styles=GAUGE_STYLES,
+    )
+
+
+def sanitize_settings(raw):
+    return runtime_validation.sanitize_settings(raw, DEFAULTS, THEMES, GAUGE_STYLES)
+
+
+def run_startup_health_check(settings):
+    return runtime_validation.run_startup_health_check(settings, USER_DATA_DIR, LOG_DIR)
 
 
 def _param(pid):
@@ -791,7 +801,8 @@ def section_label(parent, text, theme):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.settings = load_settings()
+        self.settings, self.startup_meta = load_settings()
+        self.startup_health = run_startup_health_check(self.settings)
         self.theme = dict(THEMES.get(self.settings["theme"], THEMES["4G1 Red"]))
         self._resolve_theme_fonts()
         prof = j2534.get_profile(self.settings.get("vehicle_profile"))
@@ -831,6 +842,7 @@ class App(tk.Tk):
         self.after(300, self._set_titlebar_colour)
         self.after(100, self._refresh_ui)
         self.after(280, self._status_tick)
+        self.after(350, self._show_startup_messages)
         # honour auto-connect / auto-live from settings
         if self.settings.get("auto_connect"):
             self.after(500, self.on_connect)
@@ -857,10 +869,31 @@ class App(tk.Tk):
             messagebox.showerror(
                 f"{APP_NAME} encountered a problem",
                 "The operation could not be completed. Your settings and logs "
-                f"are safe.\n\nDiagnostic log:\n{os.path.join(LOG_DIR, '4g1-live.log')}",
+                f"are safe.\n\nDiagnostic log:\n{DIAGNOSTIC_LOG_PATH}",
             )
         except Exception:
             logging.error(detail)
+
+    def _show_startup_messages(self):
+        notes = []
+        if self.startup_meta.get("first_run"):
+            notes.append(
+                "Welcome to 4G1 Live.\n\n"
+                "Use Settings → Connection to confirm your J2534 DLL path before first connect."
+            )
+        if self.startup_meta.get("recovered_from_backup"):
+            notes.append("Settings were recovered from backup because the primary settings file could not be read.")
+        if self.startup_meta.get("issues"):
+            notes.append("Some settings were corrected for safety:\n- " + "\n- ".join(self.startup_meta["issues"]))
+        failed = [c for c in self.startup_health.get("checks", []) if not c.get("ok")]
+        if failed:
+            notes.append(
+                "Startup health check found issues:\n- "
+                + "\n- ".join(f"{c['label']}: {c['detail']}" for c in failed)
+            )
+        if notes:
+            notes.append(f"Diagnostic log path:\n{DIAGNOSTIC_LOG_PATH}")
+            messagebox.showwarning(APP_NAME, "\n\n".join(notes))
 
     def _auto_live_if_ready(self):
         if self.dev and not self.live:
@@ -1740,6 +1773,11 @@ class App(tk.Tk):
             bg=t["panel"], fg=t["muted"], font=ui_font(t, 8), wraplength=900, justify="left",
         )
         tip.pack(anchor="w", padx=16, pady=(4, 14))
+        tk.Label(
+            ccard, text=f"Diagnostic log: {DIAGNOSTIC_LOG_PATH}",
+            bg=t["panel"], fg=t["muted"], font=ui_font(t, 7, mono=True),
+            anchor="w", justify="left",
+        ).pack(fill="x", padx=16, pady=(0, 12))
         advanced.pack_forget()
 
         # ---- gauges ----
@@ -1792,6 +1830,7 @@ class App(tk.Tk):
         act = tk.Frame(inner, bg=t["bg"])
         act.pack(fill="x", pady=12, padx=2)
         SoftButton(act, "Apply Settings", self.apply_settings, t, primary=True).pack(side="left")
+        SoftButton(act, "Run Self-Test", self.run_self_test, t, primary=False).pack(side="left", padx=8)
         SoftButton(act, "Reset Connection Defaults", self._reset_conn_defaults, t,
                    primary=False).pack(side="left", padx=8)
 
@@ -1841,10 +1880,7 @@ class App(tk.Tk):
     def apply_settings(self):
         self.settings["theme"] = self.theme_var.get()
         self.settings["style"] = self.style_var.get()
-        try:
-            self.settings["poll_hz"] = int(self.poll_var.get())
-        except Exception:
-            self.settings["poll_hz"] = 12
+        self.settings["poll_hz"] = self.poll_var.get()
         # vehicle profile (4G15 12V primary / 4G93 MAF secondary)
         if hasattr(self, "profile_var") and hasattr(self, "_profile_id_by_name"):
             pid = self._profile_id_by_name.get(
@@ -1853,31 +1889,27 @@ class App(tk.Tk):
             self.settings["vehicle_profile"] = pid
         # connection
         self.settings["dll_path"] = self.dll_var.get().strip()
-        try:
-            self.settings["mut_baud"] = int(self.baud_var.get())
-        except Exception:
-            self.settings["mut_baud"] = 15625
-        try:
-            self.settings["request_timeout_ms"] = int(self.timeout_var.get())
-        except Exception:
-            self.settings["request_timeout_ms"] = 400
+        self.settings["mut_baud"] = self.baud_var.get()
+        self.settings["request_timeout_ms"] = self.timeout_var.get()
         self.settings["init_addr"] = self.init_addr_var.get().strip() or "0x00"
-        try:
-            self.settings["init_attempts"] = int(self.init_att_var.get())
-        except Exception:
-            self.settings["init_attempts"] = 5
+        self.settings["init_attempts"] = self.init_att_var.get()
         self.settings["pin1_ground"] = bool(self.pin1_var.get())
         self.settings["auto_connect"] = bool(self.auto_conn_var.get())
         self.settings["auto_live"] = bool(self.auto_live_var.get())
+
+        chosen = [hex(pid) for pid, v in self.gauge_vars.items() if v.get()]
+        self.settings["gauges"] = chosen
+        self.settings, issues = save_settings(self.settings)
+        self.startup_health = run_startup_health_check(self.settings)
         # if already connected, update runtime timeout/baud on device object
         if self.dev:
             self.dev.request_timeout_ms = self.settings["request_timeout_ms"]
             self.dev.baud = self.settings["mut_baud"]
-
-        chosen = [hex(pid) for pid, v in self.gauge_vars.items() if v.get()]
-        if chosen:
-            self.settings["gauges"] = chosen
-        save_settings(self.settings)
+        if issues:
+            messagebox.showwarning(
+                APP_NAME,
+                "Some settings were corrected for safety:\n- " + "\n- ".join(issues),
+            )
         self.theme = dict(THEMES.get(self.settings["theme"], self.theme))
         self._resolve_theme_fonts()
         tab = self._active_tab
@@ -1963,6 +1995,59 @@ class App(tk.Tk):
             request_timeout_ms=int(s.get("request_timeout_ms", 400)),
         )
 
+    def _self_test_report(self, checks):
+        lines = []
+        for c in checks:
+            mark = "✓" if c["ok"] else "✗"
+            lines.append(f"{mark} {c['label']}\n    {c['detail']}")
+        return "\n".join(lines)
+
+    def run_self_test(self, interactive=True, before_connect=False):
+        self.settings, issues = sanitize_settings(self.settings)
+        health = run_startup_health_check(self.settings)
+        checks = list(health["checks"])
+        checks.append(dict(
+            key="gauge_selection",
+            label="At least one gauge is selected",
+            ok=bool(self.settings.get("gauges")),
+            detail=f"{len(self.settings.get('gauges', []))} enabled",
+        ))
+        checks.append(dict(
+            key="theme_valid",
+            label="Theme and gauge style are valid",
+            ok=(self.settings.get("theme") in THEMES and self.settings.get("style") in GAUGE_STYLES),
+            detail=f"{self.settings.get('theme')} / {self.settings.get('style')}",
+        ))
+        ok = all(c["ok"] for c in checks)
+        report = self._self_test_report(checks)
+        if interactive:
+            if ok and not issues:
+                messagebox.showinfo(APP_NAME, f"Self-test passed.\n\n{report}")
+            else:
+                note = ""
+                if issues:
+                    note = "\n\nSettings corrections:\n- " + "\n- ".join(issues)
+                messagebox.showwarning(APP_NAME, f"Self-test found issues.\n\n{report}{note}")
+        if before_connect and not ok:
+            messagebox.showerror(
+                "Connect blocked",
+                "Please resolve setup issues before connecting:\n\n"
+                + "\n".join(f"- {c['label']}: {c['detail']}" for c in checks if not c["ok"])
+                + f"\n\nDiagnostic log:\n{DIAGNOSTIC_LOG_PATH}",
+            )
+        return ok
+
+    def _connect_error_message(self, err, dll_path):
+        base = (
+            "Connection to the adapter failed.\n\n"
+            f"DLL: {dll_path}\n\n"
+            "Check that the correct J2534 driver is installed, the adapter is connected, "
+            "and no other app is using it."
+        )
+        if isinstance(err, j2534.J2534Error):
+            return f"{base}\n\nDriver details:\n{err}\n\nDiagnostic log:\n{DIAGNOSTIC_LOG_PATH}"
+        return f"{base}\n\nError:\n{err}\n\nDiagnostic log:\n{DIAGNOSTIC_LOG_PATH}"
+
     def on_connect(self):
         if self.demo:
             return
@@ -1971,6 +2056,8 @@ class App(tk.Tk):
                 messagebox.showinfo(APP_NAME, "Stop Live Data before disconnecting the adapter.")
                 return
             self._disconnect_adapter()
+            return
+        if not self.run_self_test(interactive=False, before_connect=True):
             return
         try:
             kw = self._conn_kwargs()
@@ -1997,7 +2084,7 @@ class App(tk.Tk):
         except Exception as e:
             self.dev = None
             logging.exception("Adapter connection failed")
-            messagebox.showerror("Connect failed", str(e))
+            messagebox.showerror("Connect failed", self._connect_error_message(e, self.settings.get("dll_path")))
 
     def _disconnect_adapter(self):
         try:
@@ -2127,6 +2214,15 @@ class App(tk.Tk):
             )
         except Exception as e:
             self.log_line(f"No ECU response — ignition on / run mode?  ({e})")
+            self.after(
+                0,
+                lambda: messagebox.showwarning(
+                    "Live data could not start",
+                    "Initial ECU session failed.\n\n"
+                    "Check ignition is ON (run mode), adapter cabling, and pin-1 setting."
+                    f"\n\nDetails: {e}\n\nDiagnostic log:\n{DIAGNOSTIC_LOG_PATH}",
+                ),
+            )
             self.live = False
             try:
                 self.live_btn.config(text="Start Live Data")
