@@ -19,6 +19,7 @@ import threading
 import time
 import traceback
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 
 import j2534
@@ -75,15 +76,16 @@ BAUD_PRESETS = ["15625", "10400", "9600", "4800"]
 # (secondary brand accent used for the "LIVE" wordmark in the header)
 THEMES = {
     "4G1 Red": dict(
-        # Matches the box art: near-black chrome, red "4G1" brand accent,
-        # silver numerals, blue "LIVE" wordmark highlight.
-        bg="#0a0a0c", panel="#131316", panel2="#1c1d22", elev="#26272e",
-        fg="#f5f6f8", dim="#a3a7b0", muted="#6b6f78",
-        accent="#e2202f", accent_hi="#ff4b57", accent2="#c9ced8",
+        # Premium dark chrome inspired by the box art, tuned for better depth.
+        bg="#08090d", panel="#10131a", panel2="#171b24", elev="#212734",
+        fg="#f7f8fb", dim="#a4acba", muted="#6c7688",
+        accent="#f12b3d", accent_hi="#ff5a67", accent2="#d4dae4",
         good="#3ed598", warn="#ffb020", bad="#ff4d6d",
-        border="#2a2b31", chart="#050506",
-        glow="#e2202f33", tab_sel="#1c1d22",
-        brand2="#3aa8ff",
+        border="#2d3442", chart="#06080d",
+        glow="#f12b3d33", tab_sel="#171b24",
+        brand2="#4cb7ff",
+        font_choices=("Eurostile", "Bahnschrift", "Segoe UI Semibold", "Segoe UI"),
+        mono_choices=("JetBrains Mono", "Cascadia Mono", "Consolas"),
     ),
     "Windows XP": dict(
         # Classic Luna Blue — beige chrome, blue accents, Tahoma UI
@@ -147,6 +149,23 @@ THEMES = {
     ),
 }
 GAUGE_STYLES = ["Digital", "Bar", "Dial", "Compact"]
+_FONT_CACHE = {}
+
+
+def _best_available_font(root, candidates, fallback):
+    key = (tuple(candidates or ()), fallback)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+    try:
+        families = {f.lower(): f for f in tkfont.families(root)}
+    except Exception:
+        return fallback
+    for name in candidates or ():
+        if name.lower() in families:
+            _FONT_CACHE[key] = families[name.lower()]
+            return _FONT_CACHE[key]
+    _FONT_CACHE[key] = fallback
+    return fallback
 
 
 def ui_font(theme, size, bold=False, mono=False):
@@ -773,7 +792,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.settings = load_settings()
-        self.theme = THEMES.get(self.settings["theme"], THEMES["4G1 Red"])
+        self.theme = dict(THEMES.get(self.settings["theme"], THEMES["4G1 Red"]))
+        self._resolve_theme_fonts()
         prof = j2534.get_profile(self.settings.get("vehicle_profile"))
         self.title(f"4G1 Live  —  {prof['short']}  ·  MUT-II")
         self.configure(bg=self.theme["bg"])
@@ -810,11 +830,24 @@ class App(tk.Tk):
         self._build()
         self.after(300, self._set_titlebar_colour)
         self.after(100, self._refresh_ui)
+        self.after(280, self._status_tick)
         # honour auto-connect / auto-live from settings
         if self.settings.get("auto_connect"):
             self.after(500, self.on_connect)
         if self.settings.get("auto_live"):
             self.after(1400, self._auto_live_if_ready)
+
+    def _resolve_theme_fonts(self):
+        self.theme["font"] = _best_available_font(
+            self,
+            self.theme.get("font_choices"),
+            self.theme.get("font", "Segoe UI"),
+        )
+        self.theme["mono"] = _best_available_font(
+            self,
+            self.theme.get("mono_choices"),
+            self.theme.get("mono", "Consolas"),
+        )
 
     def report_callback_exception(self, exc, val, tb):
         """Turn unexpected UI faults into a supportable error instead of a crash."""
@@ -994,9 +1027,25 @@ class App(tk.Tk):
         wrap = tk.Frame(self, bg=bar, height=72)
         wrap.pack(fill="x")
         wrap.pack_propagate(False)
-        # subtle XP-style bottom highlight under title bar
         if xp:
+            # subtle XP-style bottom highlight under title bar
             tk.Frame(wrap, bg=t.get("title2", "#3A8CF0"), height=2).pack(side="bottom", fill="x")
+        else:
+            accent_band = tk.Canvas(wrap, bg=bar, highlightthickness=0, height=6)
+            accent_band.pack(side="bottom", fill="x")
+
+            def _paint_accent_band(_e=None):
+                accent_band.delete("all")
+                w = max(accent_band.winfo_width(), 2)
+                h = max(accent_band.winfo_height(), 2)
+                c0 = t.get("accent_hi", t["accent"])
+                c1 = t.get("brand2", t["accent"])
+                for x in range(w):
+                    frac = x / max(1, w - 1)
+                    accent_band.create_line(x, 0, x, h, fill=_blend_hex(c0, c1, frac))
+                accent_band.create_line(0, 0, w, 0, fill=t["border"])
+
+            accent_band.bind("<Configure>", _paint_accent_band)
         inner = tk.Frame(wrap, bg=bar)
         inner.pack(fill="both", expand=True, padx=18, pady=10)
 
@@ -1037,8 +1086,15 @@ class App(tk.Tk):
         conn.pack(side="left")
         tk.Label(conn, text="CONNECTION", bg=bar, fg=muted,
                  font=ui_font(t, 7, bold=True)).pack(anchor="w")
-        self.status_pill = tk.Label(conn, text="●  OFFLINE", bg=bar, fg=dim,
-                                    font=ui_font(t, 9, bold=True))
+        self.status_pill = tk.Label(
+            conn, text="●  OFFLINE",
+            bg=bar if xp else t["panel2"], fg=dim,
+            font=ui_font(t, 9, bold=True),
+            padx=10 if not xp else 0,
+            pady=2 if not xp else 0,
+        )
+        if not xp:
+            self.status_pill.configure(highlightbackground=t["border"], highlightthickness=1)
         self.status_pill.pack(anchor="w", pady=(3, 0))
 
         adapter = tk.Frame(inner, bg=bar)
@@ -1109,7 +1165,7 @@ class App(tk.Tk):
 
         for k, b in self._tab_btns.items():
             if k == key:
-                b.config(fg=t["accent"], bg=t["panel"])
+                b.config(fg=t["accent"], bg=t.get("tab_sel", t["panel2"]))
             else:
                 b.config(fg=t["dim"], bg=t["panel"])
         # accent underline under active tab
@@ -1822,7 +1878,8 @@ class App(tk.Tk):
         if chosen:
             self.settings["gauges"] = chosen
         save_settings(self.settings)
-        self.theme = THEMES.get(self.settings["theme"], self.theme)
+        self.theme = dict(THEMES.get(self.settings["theme"], self.theme))
+        self._resolve_theme_fonts()
         tab = self._active_tab
         self.rebuild_ui()
         self._show_tab(tab)
@@ -1850,6 +1907,7 @@ class App(tk.Tk):
         if threading.current_thread() is not threading.main_thread():
             self.after(0, lambda: self._set_status(text, mode))
             return
+        self._status_mode = mode
         t = self.theme
         # Match header chrome (Luna blue on Windows XP)
         bar = t.get("title", t["panel"]) if t.get("xp") else t["panel"]
@@ -1863,8 +1921,38 @@ class App(tk.Tk):
             "live": (bar, live, f"●  {text}"),
             "warn": (bar, warn, f"●  {text}"),
         }
-        bg, fg, label = styles.get(mode, styles["off"])
-        self.status_pill.config(text=label, bg=bg, fg=fg)
+        if t.get("xp"):
+            bg, fg, label = styles.get(mode, styles["off"])
+            self.status_pill.config(text=label, bg=bg, fg=fg)
+            return
+
+        non_xp = {
+            "off":  (t["panel2"], t["dim"], t["border"], f"●  {text}"),
+            "ok":   (_blend_hex(t["panel2"], t["good"], 0.10), t["good"],
+                     _blend_hex(t["border"], t["good"], 0.35), f"●  {text}"),
+            "live": (_blend_hex(t["panel2"], t["accent"], 0.12), t["accent_hi"],
+                     _blend_hex(t["border"], t["accent"], 0.45), f"●  {text}"),
+            "warn": (_blend_hex(t["panel2"], t["warn"], 0.12), t["warn"],
+                     _blend_hex(t["border"], t["warn"], 0.35), f"●  {text}"),
+        }
+        bg, fg, bd, label = non_xp.get(mode, non_xp["off"])
+        self.status_pill.config(text=label, bg=bg, fg=fg, highlightbackground=bd)
+
+    def _status_tick(self):
+        if self._closing:
+            return
+        try:
+            if getattr(self, "_status_mode", "off") == "live" and hasattr(self, "status_pill"):
+                t = self.theme
+                phase = (getattr(self, "_status_phase", 0) + 1) % 10
+                self._status_phase = phase
+                pulse = 0.25 if phase < 5 else 0.05
+                self.status_pill.config(
+                    fg=_blend_hex(t["accent_hi"], t.get("brand2", t["accent"]), pulse)
+                )
+        except Exception:
+            pass
+        self.after(280, self._status_tick)
 
     # ---------- connection ----------
     def _conn_kwargs(self):
