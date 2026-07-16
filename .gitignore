@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# PyInstaller build output (regenerate via build-release.ps1)
+build/
+dist/
+
+# Packaged installers/portable zips (attach to GitHub Releases instead)
+releases/
+
+# Per-machine runtime config written by the app (real defaults live in app.py)
+settings.json

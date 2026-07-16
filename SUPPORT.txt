@@ -1,0 +1,18 @@
+4G1 LIVE SUPPORT
+
+Before requesting support, confirm:
+- Windows 10 or later
+- a correctly installed 32-bit J2534 adapter driver
+- ignition in RUN mode and the matching vehicle profile selected
+- no other application currently owns the J2534 adapter
+
+Diagnostic log:
+%LOCALAPPDATA%\4G1 Live\Logs\4g1-live.log
+
+Include the app version, Windows version, adapter model/firmware, vehicle model,
+engine, ECU part number, and the exact steps that produced the issue. Review the
+log before sharing it and remove any information you do not wish to disclose.
+
+Publisher action required before public release: replace this paragraph with a
+real support email address and response-time policy.
+

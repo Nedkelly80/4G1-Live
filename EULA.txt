@@ -1,0 +1,31 @@
+4G1 LIVE END USER LICENCE AGREEMENT — RELEASE-CANDIDATE TEMPLATE
+
+IMPORTANT PUBLISHER NOTICE: This is a release-candidate commercial template, not
+legal advice. Have qualified counsel review it and add the publisher's legal
+name, address, governing law, support contact, refund terms, and sales-channel
+requirements before public sale.
+
+By installing or using 4G1 Live, the user accepts this agreement. The publisher
+grants the user a limited, non-exclusive, non-transferable licence to install and
+use the software for lawful vehicle diagnostic purposes. The user may make one
+backup copy. The user may not resell, sublicense, reverse engineer, bypass licence
+controls, or redistribute the software except where applicable law does not allow
+those restrictions.
+
+4G1 Live is a diagnostic aid and does not replace professional judgement,
+factory service information, or independent measurement. Vehicle communication
+and displayed conversions vary by ECU, adapter, driver, wiring, and vehicle
+condition. The user is responsible for selecting the correct profile, validating
+readings, working safely, and complying with road and workplace rules. Do not
+operate the software while driving.
+
+To the extent permitted by applicable law, the software is supplied without
+warranties beyond those that cannot legally be excluded. Nothing in this
+agreement excludes, restricts, or modifies rights or remedies that applicable
+consumer law says cannot be excluded, restricted, or modified.
+
+Third-party J2534 drivers and hardware are not supplied by the publisher and are
+subject to their vendors' terms. The licence ends if the user materially breaches
+this agreement. On termination, the user must stop using and uninstall the
+software.
+
