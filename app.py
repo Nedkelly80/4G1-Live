@@ -194,7 +194,6 @@ DEFAULTS = dict(
     request_timeout_ms=400,
     auto_connect=False,
     auto_live=False,
-    power_steering_on=False,
 )
 
 
@@ -393,7 +392,8 @@ class HeroTile(tk.Frame):
         self.val = tk.Label(row, text="—", bg=theme["panel"], fg=theme["muted"],
                             font=ui_font(theme, 24, bold=True, mono=True), anchor="w")
         self.val.pack(side="left")
-        self.unit = tk.Label(row, text=units, bg=theme["panel"], fg=theme["muted"],
+        unit_text = "" if units == "state" else units
+        self.unit = tk.Label(row, text=unit_text, bg=theme["panel"], fg=theme["muted"],
                              font=ui_font(theme, 9), anchor="sw")
         self.unit.pack(side="left", padx=(5, 0), pady=(0, 2))
 
@@ -487,7 +487,8 @@ class Gauge(tk.Frame):
             self.led.pack(side="right", padx=(6, 0))
         else:
             self.led = None
-        tk.Label(head, text=self.units, bg=t["panel"], fg=t["muted"],
+        unit_text = "" if self.units == "state" else self.units
+        tk.Label(head, text=unit_text, bg=t["panel"], fg=t["muted"],
                  font=ui_font(t, 7), anchor="e").pack(side="right")
 
         if self.style == "Digital":
@@ -529,11 +530,15 @@ class Gauge(tk.Frame):
             self.val.pack(pady=(0, 4))
 
     def _range_text(self):
+        if self.units == "state":
+            return "OFF  ···  ON"
         if self.gmin < 0:
             return f"{self.gmin:g}  ···  {self.gmax:g}"
         return f"0  ···  {self.gmax:g}"
 
     def _fmt(self, v):
+        if self.units == "state":
+            return "ON" if v >= 0.5 else "OFF"
         if self.units in ("rpm", "°C", "°F", "Hz", "count", "km/h", "steps", "kPa", "°"):
             return f"{v:.0f}"
         if self.units == "V" and self.name == "O2 Sensor":
@@ -684,7 +689,9 @@ class Gauge(tk.Frame):
         ny = cy - r * 0.72 * math.sin(ang)
         c.create_line(cx, cy, nx, ny, fill=col, width=2, capstyle="round")
         c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill=t["accent"], outline=t["fg"])
-        self.val.config(text=f"{txt}  {self.units}", fg=col)
+        unit_text = "" if self.units == "state" else self.units
+        suffix = f"  {unit_text}" if unit_text else ""
+        self.val.config(text=f"{txt}{suffix}", fg=col)
 
 
 # ---------------------------------------------------------------- strip chart
@@ -860,9 +867,6 @@ class App(tk.Tk):
 
     def _scaled_px(self, base):
         return max(1, int(round(base * (self._gauge_scale_pct() / 100.0))))
-
-    def _ps_enabled(self):
-        return bool(self.settings.get("power_steering_on", False))
 
     def report_callback_exception(self, exc, val, tb):
         """Turn unexpected UI faults into a supportable error instead of a crash."""
@@ -1135,10 +1139,6 @@ class App(tk.Tk):
         self.demo_btn = SoftButton(actions, "Explore Demo", self.toggle_demo, ht,
                                    primary=False)
         self.demo_btn.pack(side="left", padx=(10, 0))
-
-        self.ps_btn = SoftButton(actions, "", self.toggle_power_steering, ht, primary=False)
-        self.ps_btn.pack(side="left", padx=(10, 0))
-        self._update_ps_button()
 
         about = tk.Label(actions, text=f"About  ·  v{VERSION}", bg=bar, fg=muted,
                          font=ui_font(t, 8), cursor="hand2")
@@ -1758,10 +1758,8 @@ class App(tk.Tk):
         self.pin1_var = tk.BooleanVar(value=bool(self.settings.get("pin1_ground", True)))
         self.auto_conn_var = tk.BooleanVar(value=bool(self.settings.get("auto_connect", False)))
         self.auto_live_var = tk.BooleanVar(value=bool(self.settings.get("auto_live", False)))
-        self.ps_switch_var = tk.BooleanVar(value=self._ps_enabled())
         for var, text in (
             (self.pin1_var, "Ground OBD pin 1 (required for CE Lancer / Mirage)"),
-            (self.ps_switch_var, "Power steering switch ON (manual app toggle)"),
             (self.auto_conn_var, "Auto-connect adapter on startup"),
             (self.auto_live_var, "Auto-start live data after connect"),
         ):
@@ -1910,7 +1908,6 @@ class App(tk.Tk):
         except Exception:
             self.settings["init_attempts"] = 5
         self.settings["pin1_ground"] = bool(self.pin1_var.get())
-        self.settings["power_steering_on"] = bool(self.ps_switch_var.get())
         self.settings["auto_connect"] = bool(self.auto_conn_var.get())
         self.settings["auto_live"] = bool(self.auto_live_var.get())
         # if already connected, update runtime timeout/baud on device object
@@ -1938,7 +1935,6 @@ class App(tk.Tk):
         self.heroes = {}
         self._build()
         self._set_titlebar_colour()
-        self._update_ps_button()
         if self.dev:
             self.connect_btn.config(text="Disconnect", state="normal")
             self.live_btn.config(state="normal")
@@ -1947,17 +1943,6 @@ class App(tk.Tk):
                 self.live_btn.config(text="Stop Live Data")
             else:
                 self._set_status("CONNECTED", "ok")
-
-    def _update_ps_button(self):
-        if not hasattr(self, "ps_btn"):
-            return
-        self.ps_btn.config(text=f"P/S Switch: {'ON' if self._ps_enabled() else 'OFF'}")
-
-    def toggle_power_steering(self):
-        self.settings["power_steering_on"] = not self._ps_enabled()
-        save_settings(self.settings)
-        self._update_ps_button()
-        self.log_line(f"Power steering switch {'ON' if self._ps_enabled() else 'OFF'}")
 
     def _set_status(self, text, mode="off"):
         if threading.current_thread() is not threading.main_thread():
