@@ -2189,6 +2189,7 @@ class App(tk.Tk):
 
         # poll hero + selected gauges (union)
         period = 1.0 / max(1, s.get("poll_hz", 12))
+        last_sw_raw = None  # raw 0x1B byte — logged on change to bench-decode switch bits
         while self.live:
             t0 = time.monotonic()
             ids = set(self.gauges.keys()) | set(self.heroes.keys())
@@ -2201,6 +2202,11 @@ class App(tk.Tk):
                 raw = self.dev.mut2_request(pid, timeout=timeout)
                 if raw is None:
                     continue
+                if pid == 0x1B and raw != last_sw_raw:
+                    last_sw_raw = raw
+                    self.log_line(
+                        f"Switch byte 0x1B  raw=0x{raw:02X}  bits={raw:08b}"
+                    )
                 name, scale, *_ = _param(pid)
                 val = scale(raw)
                 self.latest[pid] = val

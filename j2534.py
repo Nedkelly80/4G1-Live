@@ -390,7 +390,7 @@ PARAM_NOTES = {
     0x14: "raw × 0.0733  ·  running 13.2–14.8 V  ·  low alt ~12.3 V",
     0x15: "raw × 0.5 kPa  ·  sea level ~100–102",
     0x1A: "raw × 6.29 Hz (Karman vortex / AFM)",
-    0x1B: "ECU digital input  ·  0=OFF, non-zero=ON",
+    0x1B: "digital input  ·  decode unverified — Snap-on read P/S Off while app showed ON; may be multi-switch bitfield",
     0x1C: "raw × 0.625 %",
     0x2F: "raw × 2  →  km/h (AU metric)",
     0x29: "raw × 0.256 ms  ·  idle often ~2–4 ms",
