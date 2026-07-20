@@ -53,7 +53,7 @@ before sale.
 - **Codes** — read / clear classic Mitsubishi 2-digit DTCs
 - **Settings** — themes, gauge style, poll rate, vehicle profile, per-parameter show/hide with scaling + health notes
 - **Gauge box sizing** — scale dashboard gauge tiles from 70–170% in Settings
-- **Power steering switch toggle** — manual ON/OFF toggle in the header and Settings
+- **Power steering switch gauge** — ECU-driven ON/OFF state via MUT data
 - **Commercial runtime** — per-user settings, local diagnostic logs, atomic preference saves, version metadata, and friendly crash reporting
 
 ## Using it
@@ -70,6 +70,7 @@ In **Settings → Parameters**, these are available beyond the default dashboard
 
 - `0x10` Coolant Scl
 - `0x11` Intake Scl
+- `0x1B` P/S Switch (ECU ON/OFF)
 - `0x0C` Fuel Trim Lo
 - `0x0D` Fuel Trim Mid
 - `0x0E` Fuel Trim Hi

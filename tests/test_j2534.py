@@ -14,6 +14,9 @@ class J2534CatalogueTests(unittest.TestCase):
         self.assertEqual(j2534.ALL_PARAMS[0x21][1](24), 750.0)
         self.assertTrue(math.isclose(j2534.ALL_PARAMS[0x14][1](192), 14.0736))
         self.assertEqual(j2534.ALL_PARAMS[0x2F][1](50), 100.0)
+        self.assertEqual(j2534.ALL_PARAMS[0x1B][1](0), 0.0)
+        self.assertEqual(j2534.ALL_PARAMS[0x1B][1](1), 1.0)
+        self.assertEqual(j2534.ALL_PARAMS[0x1B][1](255), 1.0)
 
     def test_temperature_curve_is_monotonic(self):
         convert = j2534.ALL_PARAMS[0x07][1]
