@@ -2110,6 +2110,11 @@ class App(tk.Tk):
             0x0C: 1.5, 0x0D: -0.8, 0x0E: 0.4, 0x26: 0.0,
             0x27: 128.0, 0x24: 780.0, 0x16: 31.0, 0x38: 5.4,
         }
+        # P/S pressure switch flicks ON briefly (simulated steering input at idle)
+        values[0x1B] = 1.0 if (int(elapsed) % 9) < 2 else 0.0
+        # ECU-scaled temps mirror the raw NTC channels in demo
+        values[0x10] = values[0x07]
+        values[0x11] = values[0x3A]
         self.latest.update(values)
         snap = {"t": round(time.monotonic(), 3), "mode": "DEMO"}
         for pid in set(self.gauges) | set(self.heroes) | {0x1C, 0x21}:
