@@ -180,6 +180,7 @@ def ui_font(theme, size, bold=False, mono=False):
 DEFAULTS = dict(
     theme="4G1 Red",
     style="Dial",
+    gauge_scale=100,
     gauges=[hex(g) for g in j2534.DEFAULT_GAUGES],
     poll_hz=12,
     # primary product target; switch to 4g93_maf when live on 1.8 MAF
@@ -193,6 +194,7 @@ DEFAULTS = dict(
     request_timeout_ms=400,
     auto_connect=False,
     auto_live=False,
+    power_steering_on=False,
 )
 
 
@@ -849,6 +851,19 @@ class App(tk.Tk):
             self.theme.get("mono", "Consolas"),
         )
 
+    def _gauge_scale_pct(self):
+        try:
+            pct = int(self.settings.get("gauge_scale", 100))
+        except Exception:
+            pct = 100
+        return max(70, min(170, pct))
+
+    def _scaled_px(self, base):
+        return max(1, int(round(base * (self._gauge_scale_pct() / 100.0))))
+
+    def _ps_enabled(self):
+        return bool(self.settings.get("power_steering_on", False))
+
     def report_callback_exception(self, exc, val, tb):
         """Turn unexpected UI faults into a supportable error instead of a crash."""
         logging.error("Unhandled UI error", exc_info=(exc, val, tb))
@@ -1121,6 +1136,10 @@ class App(tk.Tk):
                                    primary=False)
         self.demo_btn.pack(side="left", padx=(10, 0))
 
+        self.ps_btn = SoftButton(actions, "", self.toggle_power_steering, ht, primary=False)
+        self.ps_btn.pack(side="left", padx=(10, 0))
+        self._update_ps_button()
+
         about = tk.Label(actions, text=f"About  ·  v{VERSION}", bg=bar, fg=muted,
                          font=ui_font(t, 8), cursor="hand2")
         about.pack(side="left", padx=(14, 0))
@@ -1285,7 +1304,7 @@ class App(tk.Tk):
                  "to see 4G1 Live in action.", bg=t["elev"], fg=t["dim"],
                  font=ui_font(t, 9)).pack(side="left")
 
-        primary = tk.Frame(self.tab_dash, bg=t["bg"], height=248)
+        primary = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(248))
         primary.pack(fill="x", pady=(8, 6))
         primary.pack_propagate(False)
         self._dash_primary = primary
@@ -1300,9 +1319,10 @@ class App(tk.Tk):
                  font=ui_font(t, 7)).pack(side="right")
         rpm_body = tk.Frame(rpm_panel, bg=t["panel"])
         rpm_body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        rpm_tile = HeroTile(rpm_body, 0x21, t, width=150)
+        rpm_tile = HeroTile(rpm_body, 0x21, t, width=self._scaled_px(150))
         rpm_tile.pack(side="left", fill="y", padx=(0, 6))
         rpm_tile.pack_propagate(False)
+        rpm_tile.configure(width=self._scaled_px(150))
         self.heroes[0x21] = rpm_tile
         self.chart_rpm = StripChart(rpm_body, t, "RPM trend", "rpm",
                                     _param(0x21)[3], accent=t["accent"])
@@ -1313,20 +1333,21 @@ class App(tk.Tk):
         for i, pid in enumerate([0x06, 0x07, 0x3A, 0x17, 0x14, 0x2F]):
             if pid not in j2534.ALL_PARAMS:
                 continue
-            tile = HeroTile(critical, pid, t)
+            tile = HeroTile(critical, pid, t, width=self._scaled_px(160), height=self._scaled_px(96))
             tile.grid(row=i // 3, column=i % 3, padx=3, pady=3, sticky="nsew")
+            tile.grid_propagate(False)
             self.heroes[pid] = tile
         for c in range(3):
             critical.grid_columnconfigure(c, weight=1, uniform="critical")
         for r in range(2):
             critical.grid_rowconfigure(r, weight=1, uniform="critical")
 
-        self.grid_frame = tk.Frame(self.tab_dash, bg=t["bg"], height=108)
+        self.grid_frame = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(108))
         self.grid_frame.pack(fill="x", pady=(0, 6))
         self.grid_frame.pack_propagate(False)
         self._build_gauges()
 
-        lower = tk.Frame(self.tab_dash, bg=t["bg"], height=105)
+        lower = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(105))
         lower.pack(fill="x", pady=(0, 6))
         lower.pack_propagate(False)
         self.chart_load = StripChart(lower, t, "Engine Load", "%",
@@ -1392,9 +1413,10 @@ class App(tk.Tk):
         ids = [i for i in ids if i in j2534.ALL_PARAMS and i not in self.heroes]
         cols = max(1, min(6, len(ids)))
         style = self.settings.get("style", "Digital")
-        h = 102
+        h = self._scaled_px(102)
+        w = self._scaled_px(220)
         for i, pid in enumerate(ids):
-            g = Gauge(self.grid_frame, pid, self.theme, style, width=220, height=h)
+            g = Gauge(self.grid_frame, pid, self.theme, style, width=w, height=h)
             g.grid(row=i // cols, column=i % cols, padx=3, pady=0, sticky="nsew")
             g.grid_propagate(False)
             self.gauges[pid] = g
@@ -1556,6 +1578,21 @@ class App(tk.Tk):
         self.style_var = tk.StringVar(value=self.settings.get("style", "Digital"))
         ttk.Combobox(style_row, textvariable=self.style_var, values=GAUGE_STYLES,
                      state="readonly", width=24).pack(side="left")
+
+        size_row = tk.Frame(card, bg=t["panel"])
+        size_row.pack(fill="x", padx=16, pady=4)
+        tk.Label(size_row, text="Gauge box size", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 10), width=16, anchor="w").pack(side="left")
+        self.gauge_scale_var = tk.StringVar(value=str(self._gauge_scale_pct()))
+        ttk.Combobox(
+            size_row,
+            textvariable=self.gauge_scale_var,
+            values=["70", "80", "90", "100", "110", "120", "130", "140", "150", "160", "170"],
+            state="readonly",
+            width=8,
+        ).pack(side="left")
+        tk.Label(size_row, text="  %", bg=t["panel"], fg=t["muted"],
+                 font=ui_font(t, 8)).pack(side="left")
 
         row3 = tk.Frame(card, bg=t["panel"])
         row3.pack(fill="x", padx=16, pady=(6, 16))
@@ -1721,8 +1758,10 @@ class App(tk.Tk):
         self.pin1_var = tk.BooleanVar(value=bool(self.settings.get("pin1_ground", True)))
         self.auto_conn_var = tk.BooleanVar(value=bool(self.settings.get("auto_connect", False)))
         self.auto_live_var = tk.BooleanVar(value=bool(self.settings.get("auto_live", False)))
+        self.ps_switch_var = tk.BooleanVar(value=self._ps_enabled())
         for var, text in (
             (self.pin1_var, "Ground OBD pin 1 (required for CE Lancer / Mirage)"),
+            (self.ps_switch_var, "Power steering switch ON (manual app toggle)"),
             (self.auto_conn_var, "Auto-connect adapter on startup"),
             (self.auto_live_var, "Auto-start live data after connect"),
         ):
@@ -1842,6 +1881,10 @@ class App(tk.Tk):
         self.settings["theme"] = self.theme_var.get()
         self.settings["style"] = self.style_var.get()
         try:
+            self.settings["gauge_scale"] = max(70, min(170, int(self.gauge_scale_var.get())))
+        except Exception:
+            self.settings["gauge_scale"] = 100
+        try:
             self.settings["poll_hz"] = int(self.poll_var.get())
         except Exception:
             self.settings["poll_hz"] = 12
@@ -1867,6 +1910,7 @@ class App(tk.Tk):
         except Exception:
             self.settings["init_attempts"] = 5
         self.settings["pin1_ground"] = bool(self.pin1_var.get())
+        self.settings["power_steering_on"] = bool(self.ps_switch_var.get())
         self.settings["auto_connect"] = bool(self.auto_conn_var.get())
         self.settings["auto_live"] = bool(self.auto_live_var.get())
         # if already connected, update runtime timeout/baud on device object
@@ -1894,6 +1938,7 @@ class App(tk.Tk):
         self.heroes = {}
         self._build()
         self._set_titlebar_colour()
+        self._update_ps_button()
         if self.dev:
             self.connect_btn.config(text="Disconnect", state="normal")
             self.live_btn.config(state="normal")
@@ -1902,6 +1947,17 @@ class App(tk.Tk):
                 self.live_btn.config(text="Stop Live Data")
             else:
                 self._set_status("CONNECTED", "ok")
+
+    def _update_ps_button(self):
+        if not hasattr(self, "ps_btn"):
+            return
+        self.ps_btn.config(text=f"P/S Switch: {'ON' if self._ps_enabled() else 'OFF'}")
+
+    def toggle_power_steering(self):
+        self.settings["power_steering_on"] = not self._ps_enabled()
+        save_settings(self.settings)
+        self._update_ps_button()
+        self.log_line(f"Power steering switch {'ON' if self._ps_enabled() else 'OFF'}")
 
     def _set_status(self, text, mode="off"):
         if threading.current_thread() is not threading.main_thread():
