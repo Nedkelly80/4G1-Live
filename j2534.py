@@ -240,10 +240,10 @@ VEHICLE_PROFILES = {
         "boost": "N/A (NA)",
         "ecu_hint": "Metal or plastic CE ECU",
         "note_overrides": {
-            0x1A: "raw × 6.29 Hz  ·  only if AFM/MAF fitted (many 4G15 use MAP)",
+            0x1A: "AFM only — this car is MAP-sensored, no AFM fitted",
             0x15: "raw × 0.5 kPa  ·  sea level ~100–102",
             0x3A: "NTC ADC → °C  ·  manifold IAT on many 4G15",
-            0x38: "MAP scale  ·  may be useful on MAP-based 4G15",
+            0x38: "raw × 0.1935 psi abs  ·  primary airflow signal on this MAP car",
         },
     },
     "4g93_maf": {
@@ -356,7 +356,7 @@ ALL_PARAMS = {
     0x14: ("Battery",      lambda x: x * 0.0733,    "V",      16, 0),
     0x15: ("Baro",         lambda x: x * 0.5,       "kPa",   110, 0),
     0x1A: ("Airflow",      lambda x: x * 6.29,      "Hz",   1600, 0),
-    0x1B: ("P/S Switch",   lambda x: 1.0 if x else 0.0, "state", 1, 0),
+    0x1B: ("Switches",     lambda x: float(x),      "raw",   255, 0),
     0x1C: ("Engine Load",  lambda x: x * 0.625,     "%",     160, 0),
     0x2F: ("Speed",        lambda x: x * 2.0,       "km/h",  220, 0),
     0x29: ("Inj Pulse",    lambda x: x * 0.256,     "ms",     66, 0),
@@ -371,11 +371,13 @@ ALL_PARAMS = {
     0x12: ("EGR Temp",     _egr_f,                  "°F",    600, 0),
     # --- turbo-oriented (often unused / N/A on NA 4G15) ---
     0x86: ("WG Duty",      _pct255,                 "%",     100, 0),
-    0x38: ("Manifold",     lambda x: x * 0.1935,    "psi",    30, 0),
+    0x38: ("Manifold",     lambda x: x * 0.1935,    "psi",    16, 0),
 }
 
-# Default gauges for CE NA live sessions (both profiles)
-DEFAULT_GAUGES = [0x21, 0x06, 0x07, 0x3A, 0x17, 0x14, 0x15, 0x1A, 0x1C, 0x2F, 0x29, 0x13]
+# Default gauges for CE NA live sessions.
+# Primary target confirmed MAP-sensored on-car 20/7/26 — 0x38 Manifold is the
+# airflow signal; AFM-equipped cars (4G93 MAF) add 0x1A from the picker.
+DEFAULT_GAUGES = [0x21, 0x06, 0x07, 0x3A, 0x17, 0x14, 0x15, 0x38, 0x1C, 0x2F, 0x29, 0x13]
 
 # Short notes shown in Settings (scaling provenance / expected range)
 # Service bands: AU CE / Mirage MFI FSM + Autodata 4G15 CE (96–05)
@@ -383,14 +385,14 @@ PARAM_NOTES = {
     0x21: "raw × 31.25  ·  FSM idle 700±50 (AU 96: 750±50)",
     0x06: "raw − 20  ·  base 5±2° BTDC @~700 (timing link earthed)",
     0x07: "NTC ADC → °C  ·  warm 80–100; ECT 2.1–2.7kΩ@20 / 0.26–0.36@80",
-    0x3A: "NTC ADC → °C  ·  IAT 2.3–3.0kΩ@20 / 0.30–0.42@80; cold≈ambient",
+    0x3A: "NTC ADC → °C  ·  IAT 2.3–3.0kΩ@20 / 0.30–0.42@80  ·  verify vs Snap-on (read 23 vs app 32, 20/7)",
     0x10: "ECU scaled  ·  °C = raw − 40  ·  if supported",
     0x11: "ECU scaled  ·  °C = raw − 40  ·  if supported",
     0x17: "raw × 100/255  ·  closed TPS adjust 400–1000 mV",
     0x14: "raw × 0.0733  ·  running 13.2–14.8 V  ·  low alt ~12.3 V",
     0x15: "raw × 0.5 kPa  ·  sea level ~100–102",
     0x1A: "raw × 6.29 Hz (Karman vortex / AFM)",
-    0x1B: "digital input  ·  decode unverified — Snap-on read P/S Off while app showed ON; may be multi-switch bitfield",
+    0x1B: "raw switch byte  ·  bit map unknown — toggle A/C / steer at idle and watch the log (Snap-on: P/S was Off while byte non-zero)",
     0x1C: "raw × 0.625 %",
     0x2F: "raw × 2  →  km/h (AU metric)",
     0x29: "raw × 0.256 ms  ·  idle often ~2–4 ms",
@@ -404,7 +406,7 @@ PARAM_NOTES = {
     0x16: "idle air stepper position",
     0x12: "−2.7×raw+597.7 °F  ·  if fitted (many AU 4G15 no EGR)",
     0x86: "turbo only — usually N/A on NA CE",
-    0x38: "MAP abs  ·  idle sensor 0.9–1.5 V  ·  useful on MAP 4G15",
+    0x38: "raw × 0.1935 psi abs  ·  engine-off ≈14.6 (Snap-on 100.9 kPa)  ·  idle ~4–6.5",
 }
 
 
@@ -506,11 +508,14 @@ def sensor_health(pid, value, ctx=None, history=None):
 
     # --- RPM ---
     if pid == 0x21:
-        if v <= 0 and ctx and any(
-            k != 0x21 and ctx.get(k) is not None for k in ctx
-        ):
-            # other data present but no rpm pulse
-            return "bad"
+        if v <= 0:
+            # Zero rpm is only a fault with evidence the engine is running.
+            # KOEO cross-check 20/7/26: key-on defaults lit this red falsely.
+            inj = _ctx_get(ctx, 0x29)
+            afm = _ctx_get(ctx, 0x1A)
+            if (inj is not None and 0.8 < inj < 25) or (afm is not None and afm > 5):
+                return "bad"
+            return None
         if v > 7500:
             return "bad"
         # vehicle stopped: evaluate against idle service band
@@ -532,6 +537,8 @@ def sensor_health(pid, value, ctx=None, history=None):
 
     # --- Timing advance ---
     if pid == 0x06:
+        if not engine_running:
+            return None  # KOEO reports a default (~61° observed) — meaningless
         if v < -5 or v > 45:
             return "bad"
         if idle_like:
@@ -640,7 +647,9 @@ def sensor_health(pid, value, ctx=None, history=None):
 
     # --- Engine load ---
     if pid == 0x1C:
-        if engine_running and v <= 0:
+        if not engine_running:
+            return None  # KOEO default (~127% observed) — meaningless
+        if v <= 0:
             return "bad"
         if v > 140:
             return "bad"
@@ -680,6 +689,8 @@ def sensor_health(pid, value, ctx=None, history=None):
 
     # --- O2 sensor voltage ---
     if pid == 0x13:
+        if not engine_running:
+            return None  # unheated sensor KOEO reads bias/noise
         if v < 0 or v > 1.15:
             return "bad"
         # Stuck rich / lean when warm
@@ -725,6 +736,8 @@ def sensor_health(pid, value, ctx=None, history=None):
 
     # --- Octane learn ---
     if pid == 0x27:
+        if not engine_running:
+            return None  # KOEO read 0 on-car — learn value only meaningful running
         if v <= 0 or v >= 250:
             return "bad"
         if 20 <= v <= 220:
@@ -749,9 +762,10 @@ def sensor_health(pid, value, ctx=None, history=None):
             return "good"
         return None
 
-    # --- Manifold absolute (MAP) — more relevant on 4G15 ---
+    # --- Manifold absolute (MAP) — primary airflow signal on MAP 4G15 ---
     if pid == 0x38:
-        if v <= 0 or v >= 28:
+        # NA absolute pressure ceiling ≈ baro (Snap-on 100.9 kPa = 14.6 psi)
+        if v <= 0 or v >= 16:
             return "bad"
         if idle_like:
             # ~25–45 kPa abs ≈ 3.6–6.5 psi absolute at idle
@@ -760,7 +774,7 @@ def sensor_health(pid, value, ctx=None, history=None):
             if 2.0 <= v < 3.0 or 8.5 < v <= 12:
                 return "warn"
             return "bad"
-        if 2.0 <= v <= 22:
+        if 2.0 <= v <= 15.5:
             return "good"
         return "warn"
 

@@ -428,7 +428,7 @@ class HeroTile(tk.Frame):
         elif frac > 0.88:
             col = t["warn"]
 
-        if self.units in ("rpm", "°C", "°F", "Hz", "count", "km/h", "steps", "kPa", "°"):
+        if self.units in ("rpm", "°C", "°F", "Hz", "count", "km/h", "steps", "kPa", "°", "raw"):
             txt = f"{value:.0f}"
         else:
             txt = f"{value:.1f}"
@@ -539,7 +539,7 @@ class Gauge(tk.Frame):
     def _fmt(self, v):
         if self.units == "state":
             return "ON" if v >= 0.5 else "OFF"
-        if self.units in ("rpm", "°C", "°F", "Hz", "count", "km/h", "steps", "kPa", "°"):
+        if self.units in ("rpm", "°C", "°F", "Hz", "count", "km/h", "steps", "kPa", "°", "raw"):
             return f"{v:.0f}"
         if self.units == "V" and self.name == "O2 Sensor":
             return f"{v:.2f}"
@@ -2110,8 +2110,8 @@ class App(tk.Tk):
             0x0C: 1.5, 0x0D: -0.8, 0x0E: 0.4, 0x26: 0.0,
             0x27: 128.0, 0x24: 780.0, 0x16: 31.0, 0x38: 5.4,
         }
-        # P/S pressure switch flicks ON briefly (simulated steering input at idle)
-        values[0x1B] = 1.0 if (int(elapsed) % 9) < 2 else 0.0
+        # Switch byte 0x1B: one bit flicks periodically (bitfield decode pending)
+        values[0x1B] = 0x08 if (int(elapsed) % 9) < 2 else 0x00
         # ECU-scaled temps mirror the raw NTC channels in demo
         values[0x10] = values[0x07]
         values[0x11] = values[0x3A]
