@@ -52,6 +52,8 @@ before sale.
 - **Sensor health LEDs** — green / amber / red on each supported gauge from AU CE / Mirage MFI FSM bands
 - **Codes** — read / clear classic Mitsubishi 2-digit DTCs
 - **Settings** — themes, gauge style, poll rate, vehicle profile, per-parameter show/hide with scaling + health notes
+- **Gauge box sizing** — scale dashboard gauge tiles from 70–170% in Settings
+- **Power steering switch toggle** — manual ON/OFF toggle in the header and Settings
 - **Commercial runtime** — per-user settings, local diagnostic logs, atomic preference saves, version metadata, and friendly crash reporting
 
 ## Using it
@@ -61,6 +63,23 @@ before sale.
 3. **Connect** — reads adapter firmware and battery voltage.
 4. **Start Live Data** — grounds OBD pin 1, MUT-II 5-baud init, then polls gauges.
 5. **Save CSV** to export a session; **Codes** tab for faults.
+
+### Extra MUT-II gauges you can enable
+
+In **Settings → Parameters**, these are available beyond the default dashboard set:
+
+- `0x10` Coolant Scl
+- `0x11` Intake Scl
+- `0x0C` Fuel Trim Lo
+- `0x0D` Fuel Trim Mid
+- `0x0E` Fuel Trim Hi
+- `0x26` Knock Sum
+- `0x27` Octane
+- `0x24` Target Idle
+- `0x16` ISC Steps
+- `0x12` EGR Temp
+- `0x86` WG Duty (turbo-oriented)
+- `0x38` Manifold (MAP-oriented)
 
 **Note:** Only one app can own the OpenPort at a time. If another tool (or an older 4G1 Live window) is connected, a second process will report “no devices available.”
 
