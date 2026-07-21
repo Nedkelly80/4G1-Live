@@ -23,6 +23,7 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 
 import j2534
+import sweep
 from product import APP_NAME, VERSION, COPYRIGHT, PRODUCT_DESCRIPTION
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -865,6 +866,7 @@ class App(tk.Tk):
         self.samples = []
         self._log_rows = []
         self._hz_times = collections.deque(maxlen=40)
+        self._sweep_wait = threading.Event()
         self._poll_hz_actual = 0.0
         self._active_tab = "dash"
         self._session_t0 = None
@@ -1553,6 +1555,7 @@ class App(tk.Tk):
         bar.pack(anchor="w", padx=18, pady=12)
         SoftButton(bar, "Read Codes", self.read_codes, t, primary=False).pack(side="left")
         SoftButton(bar, "Clear Codes", self.clear_codes, t, primary=True).pack(side="left", padx=8)
+        SoftButton(bar, "Sweep Requests", self.run_sweep, t, primary=False).pack(side="left")
 
         self.codes_box = tk.Text(
             codes_card, bg=t["chart"], fg=t["fg"], relief="flat",
@@ -2537,6 +2540,98 @@ class App(tk.Tk):
                 self.dev.release_pin1()
         except Exception:
             pass
+
+    def run_sweep(self):
+        """Sweep single-byte read requests to find channels this ECU serves.
+
+        Two passes: one now, one after the user changes engine state (a rev,
+        a load change). Channels whose raw byte moves between passes are live
+        sensors — that is how the real MAP request gets identified.
+        """
+        if self.demo:
+            messagebox.showinfo(APP_NAME, "Sweep needs a real ECU — demo data is simulated.")
+            return
+        if not self.dev:
+            messagebox.showwarning(APP_NAME, "Connect the adapter first.")
+            return
+        if self.live:
+            messagebox.showinfo(
+                APP_NAME,
+                "Stop Live Data first — the sweep needs exclusive use of the K-line.")
+            return
+        if not messagebox.askokcancel(
+            f"{APP_NAME} — Request Sweep",
+            "This asks the ECU for every single-byte read request in 0x00–0x9F "
+            "and records what answers.\n\n"
+            "Only read requests are sent. DTC/actuator command frames are never "
+            "used, and 0x38/0x39/0xFE/0xFF are skipped.\n\n"
+            "Even so, run this with the car STATIONARY, in neutral, handbrake on "
+            "— idling or key-on. Not on track, not while driving.\n\n"
+            "Two passes are taken. Between them you will be asked to change the "
+            "engine state (blip the throttle) so live channels reveal themselves.\n\n"
+            "Proceed?",
+        ):
+            return
+        threading.Thread(target=self._sweep_worker, daemon=True).start()
+
+    def _sweep_worker(self):
+        ids = sweep.sweep_ids()
+        names = {pid: j2534.ALL_PARAMS[pid][0] for pid in j2534.ALL_PARAMS}
+        pin1 = False
+        try:
+            self._sweep_out("Opening MUT-II session for sweep…\n")
+            pin1 = self._mut_session_start()
+        except Exception as e:
+            self._sweep_out(f"Could not open a MUT-II session: {e}\n")
+            return
+        passes = []
+        try:
+            self._sweep_out(f"Pass 1 of 2 — asking {len(ids)} request ids…\n")
+            passes.append(sweep.sweep_once(self.dev, ids))
+            answered = sum(1 for v in passes[0].values() if v is not None)
+            self._sweep_out(f"Pass 1 done — {answered} ids answered.\n")
+            self._sweep_wait.clear()
+            self.after(0, self._sweep_prompt_pass2)
+            if not self._sweep_wait.wait(timeout=180):
+                self._sweep_out("Timed out waiting for pass 2 — sweep abandoned.\n")
+                return
+            self._sweep_out("Pass 2 of 2…\n")
+            passes.append(sweep.sweep_once(self.dev, ids))
+            self._sweep_out("Pass 2 done.\n\n")
+        finally:
+            try:
+                self._mut_session_end(pin1)
+            except Exception:
+                pass
+        rows = sweep.analyse(passes)
+        self._sweep_out(sweep.format_report(rows, names) + "\n")
+        try:
+            os.makedirs(SESSION_DIR, exist_ok=True)
+            path = os.path.join(SESSION_DIR, time.strftime("4g1_sweep_%Y%m%d_%H%M%S.csv"))
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["request_id_hex", "known_name", "answers",
+                            "changed", "spread", "pass1", "pass2"])
+                for r in rows:
+                    vals = list(r["values"]) + [None, None]
+                    w.writerow([f"0x{r['id']:02X}", names.get(r["id"], ""),
+                                r["answers"], r["changed"], r["spread"],
+                                vals[0], vals[1]])
+            self._sweep_out(f"\nSweep saved: {path}\n")
+        except Exception:
+            logging.exception("Could not save sweep results")
+
+    def _sweep_prompt_pass2(self):
+        messagebox.showinfo(
+            f"{APP_NAME} — Sweep",
+            "Pass 1 captured.\n\nNow change the engine state so live channels "
+            "move: blip the throttle and hold a slightly higher idle, or turn "
+            "the steering to load the pump.\n\nPress OK to take pass 2.")
+        self._sweep_wait.set()
+
+    def _sweep_out(self, text):
+        self.after(0, lambda: (self.codes_box.insert("end", text),
+                               self.codes_box.see("end")))
 
     def read_codes(self):
         if not self.dev:
