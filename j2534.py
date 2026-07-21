@@ -186,7 +186,7 @@ class Device:
 
         On many pre-/early-MUT ECUs, active DTCs are bitmasks at 0x38/0x39.
         On later turbo ECUs those addresses are MDP/boost — if live data for
-        0x38 looks like pressure rather than a sparse bitmask, DTC decode may
+        0x38 read a constant 0.0 live on this car (21/7/26), so DTC decode may
         not apply to that ECU family.
         """
         lo = self.mut2_request(low_req)
@@ -243,7 +243,7 @@ VEHICLE_PROFILES = {
             0x1A: "AFM only — this car is MAP-sensored, no AFM fitted",
             0x15: "raw × 0.5 kPa  ·  sea level ~100–102",
             0x3A: "NTC ADC → °C  ·  manifold IAT on many 4G15",
-            0x38: "raw × 0.1935 psi abs  ·  primary airflow signal on this MAP car",
+            0x38: "unverified on this ECU — read flat 0.0 for an entire running session (21/7/26); real MAP request ID still unknown",
         },
     },
     "4g93_maf": {
@@ -375,9 +375,11 @@ ALL_PARAMS = {
 }
 
 # Default gauges for CE NA live sessions.
-# Primary target confirmed MAP-sensored on-car 20/7/26 — 0x38 Manifold is the
-# airflow signal; AFM-equipped cars (4G93 MAF) add 0x1A from the picker.
-DEFAULT_GAUGES = [0x21, 0x06, 0x07, 0x3A, 0x17, 0x14, 0x15, 0x38, 0x1C, 0x2F, 0x29, 0x13]
+# 0x38 was trialled as Manifold/MAP but returned a flat 0.0 for a whole
+# running session (21/7/26 on-car) — this ECU does not serve MAP there, so it
+# is OFF by default until the real request ID is found by bench sweep. Octane
+# (0x27, knock-learn) takes the slot: it is meaningful under load.
+DEFAULT_GAUGES = [0x21, 0x06, 0x07, 0x3A, 0x17, 0x14, 0x15, 0x27, 0x1C, 0x2F, 0x29, 0x13]
 
 # Short notes shown in Settings (scaling provenance / expected range)
 # Service bands: AU CE / Mirage MFI FSM + Autodata 4G15 CE (96–05)
@@ -406,7 +408,7 @@ PARAM_NOTES = {
     0x16: "idle air stepper position",
     0x12: "−2.7×raw+597.7 °F  ·  if fitted (many AU 4G15 no EGR)",
     0x86: "turbo only — usually N/A on NA CE",
-    0x38: "raw × 0.1935 psi abs  ·  engine-off ≈14.6 (Snap-on 100.9 kPa)  ·  idle ~4–6.5",
+    0x38: "no data on this ECU — flat 0.0 all session 21/7/26; off by default until real MAP id found",
 }
 
 
@@ -472,7 +474,7 @@ HEALTH_CRITERIA = {
     0x27: "Learn value · green mid-range · red at extremes 0/255",
     0x24: "Target idle green 600–1100 · red outside 400–1500",
     0x16: "ISC green 0–80 steps warm · red >120",
-    0x38: "MAP absolute · idle green ~3–8 psi · red 0 or near max",
+    0x38: "no data on this ECU — off by default; find real MAP id by bench sweep",
 }
 
 
