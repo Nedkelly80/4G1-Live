@@ -171,9 +171,13 @@ class Device:
         n = ct.c_ulong(1)
         self.dll.PassThruWriteMsgs(self.chan, ct.byref(m), ct.byref(n), timeout)
         deadline = time.monotonic() + timeout / 1000.0
+        # Inner read window is capped well under the deadline: a 15625-baud
+        # single-byte exchange answers in a few ms, so a long block here just
+        # wastes the whole poll cycle when a PID is unsupported.
+        slice_ms = max(5, min(25, timeout))
         while time.monotonic() < deadline:
             rx = PASSTHRU_MSG(ProtocolID=ISO9141); n = ct.c_ulong(1)
-            rc = self.dll.PassThruReadMsgs(self.chan, ct.byref(rx), ct.byref(n), 100)
+            rc = self.dll.PassThruReadMsgs(self.chan, ct.byref(rx), ct.byref(n), slice_ms)
             if rc == 0 and n.value and rx.DataSize:
                 if rx.RxStatus & TX_MSG_TYPE:   # skip echo of our own request
                     continue

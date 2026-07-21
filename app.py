@@ -31,6 +31,9 @@ USER_DATA_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", SOURCE_DIR), "4G1 Live"
 )
 LOG_DIR = os.path.join(USER_DATA_DIR, "Logs")
+# Every live/demo session is streamed to its own CSV here as it is captured,
+# so telemetry survives a crash, a stall or an accidental restart.
+SESSION_DIR = os.path.join(USER_DATA_DIR, "Sessions")
 SETTINGS_PATH = os.path.join(USER_DATA_DIR, "settings.json")
 LEGACY_SETTINGS_PATH = os.path.join(SOURCE_DIR, "settings.json")
 ICON_PATH = os.path.join(APP_DIR, "4g1.ico")          # window / taskbar (.ico)
@@ -2181,6 +2184,7 @@ class App(tk.Tk):
         self._log_rows = []
         self._hz_times.clear()
         self._session_t0 = time.monotonic()
+        self._autosave_start("demo")
         self.demo_btn.config(text="Stop Demo")
         self.connect_btn.config(state="disabled")
         self.live_btn.config(text="Demo Mode", state="disabled")
@@ -2223,6 +2227,7 @@ class App(tk.Tk):
             if pid in values:
                 snap[_param(pid)[0]] = round(values[pid], 2)
         self.samples.append(snap)
+        self._autosave_row(snap)
         self._hz_times.append(time.monotonic())
         if len(self._hz_times) >= 2:
             dt = self._hz_times[-1] - self._hz_times[0]
@@ -2244,6 +2249,7 @@ class App(tk.Tk):
         self.samples = []
         self._hz_times.clear()
         self._session_t0 = time.monotonic()
+        self._autosave_start("live")
         if hasattr(self, "chart_rpm"):
             self.chart_rpm.clear()
         if hasattr(self, "chart_load"):
@@ -2291,7 +2297,18 @@ class App(tk.Tk):
 
         # poll hero + selected gauges (union)
         period = 1.0 / max(1, s.get("poll_hz", 12))
+        # Live polling uses a short per-request window: at 15625 baud a
+        # single-byte answer lands in a few ms. The long timeout above is for
+        # init/DTC work, not the hot loop.
+        live_timeout = max(20, min(timeout, int(s.get("live_timeout_ms", 60))))
         last_sw_raw = None  # raw 0x1B byte — logged on change to bench-decode switch bits
+        # Channels that physically cannot change fast (temps, baro, battery,
+        # octane/knock learn) are polled every Nth cycle instead of every cycle.
+        SLOW_PIDS = {0x07, 0x3A, 0x10, 0x11, 0x15, 0x14, 0x27, 0x12}
+        SLOW_EVERY = 6
+        misses = {}          # pid -> consecutive no-answer count
+        dead = set()         # pids this ECU does not serve — stop asking
+        cycle = 0
         while self.live:
             t0 = time.monotonic()
             ids = set(self.gauges.keys()) | set(self.heroes.keys())
@@ -2299,11 +2316,22 @@ class App(tk.Tk):
             ids.add(0x21)
             snap = {"t": round(t0, 3)}
             for pid in ids:
-                if pid not in j2534.ALL_PARAMS:
+                if pid not in j2534.ALL_PARAMS or pid in dead:
                     continue
-                raw = self.dev.mut2_request(pid, timeout=timeout)
+                if pid in SLOW_PIDS and (cycle % SLOW_EVERY) and pid in self.latest:
+                    continue
+                raw = self.dev.mut2_request(pid, timeout=live_timeout)
                 if raw is None:
+                    misses[pid] = misses.get(pid, 0) + 1
+                    if misses[pid] >= 12:
+                        dead.add(pid)
+                        name = _param(pid)[0]
+                        self.log_line(
+                            f"{name} (0x{pid:02X}) not answered by this ECU "
+                            f"— dropped from polling to keep the rate up"
+                        )
                     continue
+                misses[pid] = 0
                 if pid == 0x1B and raw != last_sw_raw:
                     last_sw_raw = raw
                     self.log_line(
@@ -2314,6 +2342,8 @@ class App(tk.Tk):
                 self.latest[pid] = val
                 snap[name] = round(val, 2)
             self.samples.append(snap)
+            self._autosave_row(snap)
+            cycle += 1
             self._hz_times.append(time.monotonic())
             if len(self._hz_times) >= 2:
                 dt = self._hz_times[-1] - self._hz_times[0]
@@ -2329,6 +2359,7 @@ class App(tk.Tk):
         except Exception:
             pass
         self.log_line("Live data stopped")
+        self._autosave_stop()
         self._session_t0 = None
 
     # ---------- UI refresh ----------
@@ -2410,6 +2441,57 @@ class App(tk.Tk):
         self.logbox.delete("1.0", "end")
         self.samples = []
         self._log_rows = []
+
+    def _autosave_start(self, tag="live"):
+        """Open a crash-safe session CSV. Every sample is appended as it is
+        captured, so a crash, a flat battery or an accidental restart can
+        never lose a session again."""
+        self._autosave_path = None
+        self._autosave_cols = None
+        self._autosave_fh = None
+        try:
+            os.makedirs(SESSION_DIR, exist_ok=True)
+            name = time.strftime(f"4g1_{tag}_%Y%m%d_%H%M%S.csv")
+            path = os.path.join(SESSION_DIR, name)
+            self._autosave_fh = open(path, "w", newline="", encoding="utf-8")
+            self._autosave_path = path
+            self.log_line(f"Auto-saving this session to {path}")
+        except Exception:
+            logging.exception("Could not open autosave file")
+            self._autosave_fh = None
+
+    def _autosave_row(self, snap):
+        fh = getattr(self, "_autosave_fh", None)
+        if fh is None:
+            return
+        try:
+            if self._autosave_cols is None:
+                self._autosave_cols = list(snap.keys())
+                fh.write(",".join(self._autosave_cols) + "\n")
+            for k in snap:
+                if k not in self._autosave_cols:
+                    self._autosave_cols.append(k)
+            fh.write(",".join(str(snap.get(c, "")) for c in self._autosave_cols) + "\n")
+            fh.flush()   # flush every row — the whole point is crash safety
+        except Exception:
+            logging.exception("Autosave row failed")
+            try:
+                fh.close()
+            except Exception:
+                pass
+            self._autosave_fh = None
+
+    def _autosave_stop(self):
+        fh = getattr(self, "_autosave_fh", None)
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        self._autosave_fh = None
+        path = getattr(self, "_autosave_path", None)
+        if path:
+            self.log_line(f"Session saved: {path}")
 
     def save_csv(self):
         if not self.samples:
