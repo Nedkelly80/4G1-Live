@@ -139,6 +139,21 @@ THEMES = {
         border="#2c333e", chart="#07080a",
         glow="#94a3b833", tab_sel="#1e232b",
     ),
+    "Ralliart": dict(
+        # Mitsubishi Ralliart works livery: competition red on near-black
+        # graphite, with chrome-silver secondary (the wordmark reads silver,
+        # not blue, so the header sits closer to the Ralliart badge).
+        bg="#08080a", panel="#111215", panel2="#191b1f", elev="#23262b",
+        fg="#f5f6f8", dim="#a3a8af", muted="#6a7078",
+        accent="#e60012", accent_hi="#ff2b3a", accent2="#c9ced5",
+        good="#35c98d", warn="#ffb020", bad="#ff4d6d",
+        border="#2b2f36", chart="#050506",
+        glow="#e6001233", tab_sel="#191b1f",
+        brand2="#c9ced5",
+        font_choices=("Eurostile", "Bahnschrift Condensed", "Bahnschrift",
+                      "Segoe UI Semibold", "Segoe UI"),
+        mono_choices=("JetBrains Mono", "Cascadia Mono", "Consolas"),
+    ),
     "Racing Green": dict(
         bg="#070c0a", panel="#0e1612", panel2="#15221b", elev="#1c2e24",
         fg="#eaf6ef", dim="#86a092", muted="#547064",
