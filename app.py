@@ -201,7 +201,9 @@ def load_settings():
     s = dict(DEFAULTS)
     for path in (SETTINGS_PATH, LEGACY_SETTINGS_PATH):
         try:
-            with open(path, encoding="utf-8") as f:
+            # utf-8-sig: tolerate a BOM from external editors/tools —
+            # a BOM'd file silently reset everything to defaults (21/7/26)
+            with open(path, encoding="utf-8-sig") as f:
                 s.update(json.load(f))
             break
         except FileNotFoundError:
@@ -817,6 +819,19 @@ class App(tk.Tk):
         win_h = min(768, max(680, sh - 72))
         self.geometry(f"{win_w}x{win_h}")
         self.minsize(960, 640)
+        try:
+            self.state("zoomed")  # full-screen dash by default; autofit trims to suit
+        except Exception:
+            pass
+        # Responsive fit: extra factor applied on top of the user's gauge
+        # scale so the full dashboard stack (heroes, gauge grid, health
+        # strip, telemetry log) always fits the screen. 1080-class laptops
+        # clipped the footer at 100% — seen at the 20/7 on-car session.
+        self._fit_factor = 1.0
+        self._fit_tries = 0
+        self._fit_job = None
+        self._last_root_h = 0
+        self.bind("<Configure>", self._on_root_resize)
         self._logo_img = None  # keep PhotoImage refs alive
         self._mark_img = None
         self._app_icon = None
@@ -866,7 +881,71 @@ class App(tk.Tk):
         return max(70, min(170, pct))
 
     def _scaled_px(self, base):
-        return max(1, int(round(base * (self._gauge_scale_pct() / 100.0))))
+        fit = getattr(self, "_fit_factor", 1.0)
+        return max(1, int(round(base * (self._gauge_scale_pct() / 100.0) * fit)))
+
+    def _on_root_resize(self, evt):
+        if evt.widget is not self:
+            return
+        if abs(evt.height - self._last_root_h) < 30:
+            return
+        self._last_root_h = evt.height
+        if self._fit_job:
+            try:
+                self.after_cancel(self._fit_job)
+            except Exception:
+                pass
+        self._fit_tries = 0
+        self._fit_job = self.after(250, self._autofit_dash)
+
+    def _autofit_dash(self):
+        """Shrink (or restore) the dashboard so the whole stack fits on
+        screen — nothing important gets clipped off the bottom."""
+        self._fit_job = None
+        tab = getattr(self, "tab_dash", None)
+        if tab is None or not tab.winfo_exists():
+            return
+        if getattr(self, "_active_tab", "dash") != "dash":
+            return  # re-checked when the dash tab is shown
+        try:
+            self.update_idletasks()  # settle geometry before measuring
+            avail = tab.winfo_height()
+            req = tab.winfo_reqheight()
+        except Exception:
+            return
+        if avail <= 80 or req <= 0:
+            # not laid out yet — retry briefly
+            if self._fit_tries < 15:
+                self._fit_tries += 1
+                self._fit_job = self.after(200, self._autofit_dash)
+            return
+        if req > avail + 4:
+            new = max(0.60, self._fit_factor * (avail / float(req)))
+            if new < self._fit_factor - 0.005:
+                self._fit_factor = new
+                self._rebuild_dash()
+        elif self._fit_factor < 0.995 and req < avail - 140:
+            # window grew — claw back toward full size, with hysteresis
+            new = min(1.0, self._fit_factor * (avail / float(req)) * 0.96)
+            if new > self._fit_factor + 0.04:
+                self._fit_factor = new
+                self._rebuild_dash()
+
+    def _rebuild_dash(self):
+        keep_log = ""
+        try:
+            keep_log = self.logbox.get("1.0", "end-1c")
+        except Exception:
+            pass
+        for w in self.tab_dash.winfo_children():
+            w.destroy()
+        self._build_dash()
+        if keep_log.strip():
+            try:
+                self.logbox.insert("end", keep_log + "\n")
+                self.logbox.see("end")
+            except Exception:
+                pass
 
     def report_callback_exception(self, exc, val, tb):
         """Turn unexpected UI faults into a supportable error instead of a crash."""
@@ -1198,6 +1277,9 @@ class App(tk.Tk):
             self._tab_line.place(x=x, y=0, height=2)
         except Exception:
             pass
+        if key == "dash":
+            self._fit_tries = 0
+            self.after(120, self._autofit_dash)
 
     def _footer(self):
         t = self.theme
@@ -1304,6 +1386,51 @@ class App(tk.Tk):
                  "to see 4G1 Live in action.", bg=t["elev"], fg=t["dim"],
                  font=ui_font(t, 9)).pack(side="left")
 
+        # Bottom-anchored sections pack FIRST so they always keep their
+        # space — shortfall pinches the middle, which _autofit_dash repairs.
+        logwrap_outer, logwrap = card(self.tab_dash, t)
+        logwrap_outer.pack(side="bottom", fill="both", expand=True, pady=(0, 4))
+        bar = tk.Frame(logwrap, bg=t["panel"])
+        bar.pack(fill="x")
+        tk.Label(bar, text="TELEMETRY LOG", bg=t["panel"], fg=t["dim"],
+                 font=ui_font(t, 8, bold=True)).pack(side="left", padx=12, pady=7)
+        save = tk.Label(bar, text="  Save CSV  ", bg=t["panel2"], fg=t["fg"],
+                        font=ui_font(t, 8, bold=True), cursor="hand2", pady=4)
+        save.pack(side="right", padx=8, pady=4)
+        save.bind("<Button-1>", lambda e: self.save_csv())
+        clr = tk.Label(bar, text="  Clear  ", bg=t["elev"], fg=t["dim"],
+                       font=ui_font(t, 8, bold=True), cursor="hand2", pady=4)
+        clr.pack(side="right", pady=4)
+        clr.bind("<Button-1>", lambda e: self.clear_log())
+        self.logbox = tk.Text(
+            logwrap, bg=t["chart"], fg=t["accent2"], relief="flat",
+            font=ui_font(t, 8, mono=True), height=3, wrap="none",
+            insertbackground=t["fg"], selectbackground=t["panel2"], padx=8, pady=5,
+        )
+        self.logbox.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+
+        lower = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(105))
+        lower.pack(side="bottom", fill="x", pady=(0, 6))
+        lower.pack_propagate(False)
+        self.chart_load = StripChart(lower, t, "Engine Load", "%",
+                                     _param(0x1C)[3], accent=t["good"])
+        self.chart_load.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        health_outer, health = card(lower, t, accent=t.get("good"))
+        health_outer.pack(side="left", fill="both", expand=True)
+        tk.Label(health, text="SESSION HEALTH", bg=t["panel"], fg=t["dim"],
+                 font=ui_font(t, 8, bold=True)).pack(anchor="w", padx=14, pady=(7, 5))
+        metrics = tk.Frame(health, bg=t["panel"])
+        metrics.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        self.hz_lbl = tk.Label(metrics, text="— Hz", bg=t["panel"], fg=t["muted"],
+                               font=ui_font(t, 12, bold=True, mono=True))
+        self.hz_lbl.pack(side="left", expand=True)
+        self.n_lbl = tk.Label(metrics, text="0 samples", bg=t["panel"], fg=t["muted"],
+                              font=ui_font(t, 10, mono=True))
+        self.n_lbl.pack(side="left", expand=True)
+        self.sess_lbl = tk.Label(metrics, text="Session —", bg=t["panel"], fg=t["muted"],
+                                 font=ui_font(t, 10, mono=True))
+        self.sess_lbl.pack(side="left", expand=True)
+
         primary = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(248))
         primary.pack(fill="x", pady=(8, 6))
         primary.pack_propagate(False)
@@ -1347,49 +1474,9 @@ class App(tk.Tk):
         self.grid_frame.pack_propagate(False)
         self._build_gauges()
 
-        lower = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(105))
-        lower.pack(fill="x", pady=(0, 6))
-        lower.pack_propagate(False)
-        self.chart_load = StripChart(lower, t, "Engine Load", "%",
-                                     _param(0x1C)[3], accent=t["good"])
-        self.chart_load.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        health_outer, health = card(lower, t, accent=t.get("good"))
-        health_outer.pack(side="left", fill="both", expand=True)
-        tk.Label(health, text="SESSION HEALTH", bg=t["panel"], fg=t["dim"],
-                 font=ui_font(t, 8, bold=True)).pack(anchor="w", padx=14, pady=(7, 5))
-        metrics = tk.Frame(health, bg=t["panel"])
-        metrics.pack(fill="both", expand=True, padx=14, pady=(0, 8))
-        self.hz_lbl = tk.Label(metrics, text="— Hz", bg=t["panel"], fg=t["muted"],
-                               font=ui_font(t, 12, bold=True, mono=True))
-        self.hz_lbl.pack(side="left", expand=True)
-        self.n_lbl = tk.Label(metrics, text="0 samples", bg=t["panel"], fg=t["muted"],
-                              font=ui_font(t, 10, mono=True))
-        self.n_lbl.pack(side="left", expand=True)
-        self.sess_lbl = tk.Label(metrics, text="Session —", bg=t["panel"], fg=t["muted"],
-                                 font=ui_font(t, 10, mono=True))
-        self.sess_lbl.pack(side="left", expand=True)
-
-        logwrap_outer, logwrap = card(self.tab_dash, t)
-        logwrap_outer.pack(fill="both", expand=True, pady=(0, 4))
-        bar = tk.Frame(logwrap, bg=t["panel"])
-        bar.pack(fill="x")
-        tk.Label(bar, text="TELEMETRY LOG", bg=t["panel"], fg=t["dim"],
-                 font=ui_font(t, 8, bold=True)).pack(side="left", padx=12, pady=7)
-        save = tk.Label(bar, text="  Save CSV  ", bg=t["panel2"], fg=t["fg"],
-                        font=ui_font(t, 8, bold=True), cursor="hand2", pady=4)
-        save.pack(side="right", padx=8, pady=4)
-        save.bind("<Button-1>", lambda e: self.save_csv())
-        clr = tk.Label(bar, text="  Clear  ", bg=t["elev"], fg=t["dim"],
-                       font=ui_font(t, 8, bold=True), cursor="hand2", pady=4)
-        clr.pack(side="right", pady=4)
-        clr.bind("<Button-1>", lambda e: self.clear_log())
-        self.logbox = tk.Text(
-            logwrap, bg=t["chart"], fg=t["accent2"], relief="flat",
-            font=ui_font(t, 8, mono=True), height=3, wrap="none",
-            insertbackground=t["fg"], selectbackground=t["panel2"], padx=8, pady=5,
-        )
-        self.logbox.pack(fill="both", expand=True, padx=4, pady=(0, 4))
         self._update_idle_banner()
+        self._fit_tries = 0
+        self.after(150, self._autofit_dash)
 
     def _update_idle_banner(self):
         """Show a friendly call-to-action instead of blank dashes before data flows."""
