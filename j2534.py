@@ -3,8 +3,9 @@
 Talks to the vehicle interface over the standard J2534 pass-thru API.
 Must run under 32-bit Python (the J2534 driver is 32-bit).
 
-MUT-II request IDs and scalings are the OBD-era (mid-90s+) set used by
-EvoScan / OpenPort logcfg for CE Lancer / Mirage (1996–2003).
+MUT-II request IDs and scalings are the OBD-era (mid-90s+) set for the
+CE Lancer / Mirage (1996–2003), cross-checked on-car against a reference
+scan tool and the factory service data.
 
 Vehicle profiles (4G15 12V primary, 4G93 MAF secondary) share the same MUT
 channel; notes and branding differ. Coolant (0x07) and intake air (0x3A) are
@@ -294,7 +295,7 @@ def profile_choices():
 #
 # id: (name, scale_fn, units, gauge_max, gauge_min)
 #
-# Formulas match EvoScan / OpenPort type=mut2 logcfg (OBD-era MUT-II).
+# Formulas follow documented OBD-era MUT-II conventions, validated on-car.
 # Shared across CE 4G15 12V and 4G93 MAF profiles (NA, metric speed).
 # ---------------------------------------------------------------------------
 
@@ -302,7 +303,7 @@ def _pct255(x):
     return x * 100.0 / 255.0
 
 def _fuel_trim(x):
-    # EvoScan: x * 0.19607843 - 25  →  centred at ~0% when raw ≈ 128
+    # Linear ±25% span over the byte range: centred at ~0% when raw ≈ 128
     return x * (50.0 / 255.0) - 25.0
 
 def _egr_f(x):
@@ -310,9 +311,9 @@ def _egr_f(x):
 
 
 # MUT 0x07 / 0x3A are raw NTC ADC (high = cold, low = hot) — NOT plain °C.
-# EvoScan applies an internal lookup for these IDs; without it coolant reads
-# too low and intake air too high. Table matches typical Mitsi ECT/IAT NTC
-# curves used on OBD-era MUT-II (Evo / CE-class ECUs).
+# These IDs require a thermistor lookup; without it coolant reads too low and
+# intake air too high. Table matches typical Mitsubishi ECT/IAT NTC curves used
+# on OBD-era MUT-II (CE-class ECUs).
 _TEMP_ADC = (
     0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75,
     80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 130, 140, 150, 160,

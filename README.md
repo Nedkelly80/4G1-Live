@@ -87,7 +87,7 @@ In **Settings → Parameters**, these are available beyond the default dashboard
 ## MUT-II scalings (CE / OBD-era)
 
 The common linear formulas below match published MUT-II community references and
-long-standing EvoScan/OpenPort conventions. Mitsubishi does not publish one
+long-standing OBD-era MUT-II conventions. Mitsubishi does not publish one
 universal raw-byte conversion table for every ECU family, so this catalogue must
 be validated against the exact ECU/profile before commercial release.
 
@@ -150,7 +150,7 @@ Bands are taken from **AU CE / Mirage 1.5L MFI FSM** service specs and
 | Baro | Sea level **95–105 kPa** | MUT convention |
 | Airflow | Idle **~15–80 Hz** (Karman MAF / 4G93) | Community MAF + profile |
 | O2 | Warm closed-loop **switching** 0–400 ↔ 600–1000 mV | FSM data-list check |
-| Inj pulse | Idle **1.5–5.0 ms** | EvoScan-class idle band |
+| Inj pulse | Idle **1.5–5.0 ms** | Typical OBD-era idle band |
 | Fuel trim | **±10%** good; red beyond **±18%** | Practical closed-loop |
 | MAP (0x38) | Idle absolute **~3–8 psi** (0.9–1.5 V sensor) | FSM vacuum-sensor check |
 
@@ -187,7 +187,7 @@ per profile. Minimum checks:
 
 1. Key-on engine-off: battery against a multimeter; coolant and intake against ambient.
 2. Warm idle: RPM against the tachometer, coolant against a trusted scan tool,
-   injector pulse and timing against EvoScan (or an equivalent known-good logger).
+   injector pulse and timing against a known-good reference logger.
 3. Road test with two people: speed against GPS at several steady speeds; throttle
    at closed, part, and wide-open positions; barometric pressure against local pressure.
 4. Save the raw-byte CSV evidence and record ECU part number, engine, firmware,
