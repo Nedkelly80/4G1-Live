@@ -14,12 +14,12 @@ VSVersionInfo(
       StringTable('040904B0', [
         StringStruct('CompanyName', '4G1 Live'),
         StringStruct('FileDescription', 'Mitsubishi MUT-II live ECU data and diagnostics'),
-        StringStruct('FileVersion', '1.0.0-rc5'),
+        StringStruct('FileVersion', '1.0.0-rc6'),
         StringStruct('InternalName', '4G1Live'),
         StringStruct('LegalCopyright', 'Copyright © 2026 4G1 Live'),
         StringStruct('OriginalFilename', '4G1 Live.exe'),
         StringStruct('ProductName', '4G1 Live'),
-        StringStruct('ProductVersion', '1.0.0-rc5')
+        StringStruct('ProductVersion', '1.0.0-rc6')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

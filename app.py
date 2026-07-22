@@ -2107,7 +2107,33 @@ class App(tk.Tk):
                 )
         except Exception:
             pass
+        self._stale_data_watchdog()
         self.after(280, self._status_tick)
+
+    def _stale_data_watchdog(self):
+        """Catch a live session that has silently stopped producing samples.
+
+        Belt and braces for the poll loop's own error handling: if the polling
+        thread dies, hangs, or blocks on a wedged driver call, the dashboard
+        would otherwise keep showing its last readings under a LIVE header.
+        Anything older than a few seconds is not live data, so say so.
+        """
+        if self.demo or not self.live:
+            self._stale_flagged = False
+            return
+        last = self._hz_times[-1] if self._hz_times else self._session_t0
+        if last is None:
+            return
+        stale_for = time.monotonic() - last
+        if stale_for < 5.0:
+            self._stale_flagged = False
+            return
+        if getattr(self, "_stale_flagged", False):
+            return
+        self._stale_flagged = True
+        self._live_stopped_by_fault(
+            f"no data received for {stale_for:.0f}s — check the adapter and cable"
+        )
 
     # ---------- connection ----------
     def _conn_kwargs(self):
@@ -2318,6 +2344,8 @@ class App(tk.Tk):
         misses = {}          # pid -> consecutive no-answer count
         dead = set()         # pids this ECU does not serve — stop asking
         cycle = 0
+        comm_errors = 0      # consecutive hard adapter failures (not timeouts)
+        stop_reason = None
         while self.live:
             t0 = time.monotonic()
             ids = set(self.gauges.keys()) | set(self.heroes.keys())
@@ -2329,7 +2357,19 @@ class App(tk.Tk):
                     continue
                 if pid in SLOW_PIDS and (cycle % SLOW_EVERY) and pid in self.latest:
                     continue
-                raw = self.dev.mut2_request(pid, timeout=live_timeout)
+                try:
+                    raw = self.dev.mut2_request(pid, timeout=live_timeout)
+                except Exception as e:
+                    # A raised error means the adapter or driver itself failed —
+                    # cable pulled, USB reset, driver fault. A no-answer timeout
+                    # is a None return and is handled separately below.
+                    comm_errors += 1
+                    logging.exception("Adapter request failed (0x%02X)", pid)
+                    if comm_errors >= 8:
+                        stop_reason = f"adapter communication lost ({e})"
+                        break
+                    continue
+                comm_errors = 0
                 if raw is None:
                     misses[pid] = misses.get(pid, 0) + 1
                     if misses[pid] >= 12:
@@ -2350,6 +2390,8 @@ class App(tk.Tk):
                 val = scale(raw)
                 self.latest[pid] = val
                 snap[name] = round(val, 2)
+            if stop_reason:
+                break
             self.samples.append(snap)
             self._autosave_row(snap)
             cycle += 1
@@ -2367,9 +2409,27 @@ class App(tk.Tk):
                 self.dev.release_pin1()
         except Exception:
             pass
-        self.log_line("Live data stopped")
         self._autosave_stop()
         self._session_t0 = None
+        if stop_reason:
+            # Never leave the dashboard sitting on frozen numbers while the
+            # header still says LIVE — that reads as good data.
+            self.live = False
+            self.after(0, self._live_stopped_by_fault, stop_reason)
+        else:
+            self.log_line("Live data stopped")
+
+    def _live_stopped_by_fault(self, reason):
+        """End a live session that died on us, loudly and visibly."""
+        self.live = False
+        try:
+            self.live_btn.config(text="Start Live Data")
+        except Exception:
+            pass
+        self._set_status("COMMS LOST", "warn")
+        self.log_line(f"LIVE DATA STOPPED — {reason}")
+        self.log_line("Readings on screen are the last values received, not current.")
+        self._update_idle_banner()
 
     # ---------- UI refresh ----------
     def _refresh_ui(self):
