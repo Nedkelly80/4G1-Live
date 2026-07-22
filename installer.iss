@@ -1,6 +1,16 @@
+; Version and publisher are supplied by build-release.ps1 from product.py
+; (the single source of truth). The defaults below are only a fallback for a
+; manual ISCC run and must not be relied on for a real release.
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0-manual"
+#endif
+#ifndef MyAppPublisher
+  #define MyAppPublisher "4G1 Live"
+#endif
+#ifndef MyAppVersionNumeric
+  #define MyAppVersionNumeric "0.0.0.0"
+#endif
 #define MyAppName "4G1 Live"
-#define MyAppVersion "1.0.0-rc3"
-#define MyAppPublisher "4G1 Live"
 #define MyAppExeName "4G1 Live.exe"
 
 [Setup]
@@ -23,11 +33,11 @@ WizardStyle=modern
 ArchitecturesAllowed=x86 x64compatible
 PrivilegesRequired=admin
 MinVersion=10.0
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion={#MyAppVersionNumeric}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Installer
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion=1.0.0.0
+VersionInfoProductVersion={#MyAppVersionNumeric}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

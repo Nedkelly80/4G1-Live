@@ -30,18 +30,38 @@ try {
         }
     }
 
+    # --- Single source of truth: read release metadata from product.py -------
+    $Version = & $Python32 -c "import product; print(product.VERSION)"
+    $Publisher = & $Python32 -c "import product; print(product.PUBLISHER)"
+    $VersionNumeric = & $Python32 -c "import make_version_info as m, product; print('.'.join(str(n) for n in m.numeric_version(product.VERSION)))"
+    if (-not $Version) { throw "Could not read VERSION from product.py" }
+    Write-Host "Building $Publisher 4G1 Live $Version ($VersionNumeric)" -ForegroundColor Cyan
+
+    # Regenerate the Windows VERSIONINFO resource so the .exe properties, the
+    # installer and the app can never disagree about the version.
+    & $Python32 "make_version_info.py"
+    if ($LASTEXITCODE -ne 0) { throw "version-info generation failed" }
+
     & $Python32 -m PyInstaller --noconfirm "4G1Live.spec"
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
-    & $Iscc "installer.iss"
+    & $Iscc "/DMyAppVersion=$Version" "/DMyAppPublisher=$Publisher" `
+            "/DMyAppVersionNumeric=$VersionNumeric" "installer.iss"
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
-    $Portable = Join-Path $Root "releases\4G1-Live-1.0.0-rc3-portable-win32.zip"
+    $Portable = Join-Path $Root "releases\4G1-Live-$Version-portable-win32.zip"
     if (Test-Path -LiteralPath $Portable) { Remove-Item -LiteralPath $Portable -Force }
     Compress-Archive -Path "dist\4G1 Live\*" -DestinationPath $Portable -CompressionLevel Optimal
 
-    Get-FileHash -Algorithm SHA256 "releases\4G1-Live-Setup-1.0.0-rc3-win32.exe", $Portable |
-        Format-Table -AutoSize
+    $Setup = Join-Path $Root "releases\4G1-Live-Setup-$Version-win32.exe"
+    $Hashes = Get-FileHash -Algorithm SHA256 $Setup, $Portable
+    $Hashes | Format-Table -AutoSize
+
+    # Publish the checksums next to the artifacts so downloads can be verified.
+    $ManifestPath = Join-Path $Root "releases\SHA256SUMS-$Version.txt"
+    $Hashes | ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
+        Set-Content -LiteralPath $ManifestPath -Encoding ascii
+    Write-Host "Checksums written to $ManifestPath" -ForegroundColor Cyan
 }
 finally {
     Pop-Location
