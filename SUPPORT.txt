@@ -6,13 +6,22 @@ Before requesting support, confirm:
 - ignition in RUN mode and the matching vehicle profile selected
 - no other application currently owns the J2534 adapter
 
-Diagnostic log:
-%LOCALAPPDATA%\4G1 Live\Logs\4g1-live.log
+Contact: trm.racinglooms@gmail.com
 
-Include the app version, Windows version, adapter model/firmware, vehicle model,
-engine, ECU part number, and the exact steps that produced the issue. Review the
-log before sharing it and remove any information you do not wish to disclose.
+4G1 Live is supported by a single developer. Support is best-effort: expect a
+reply within 3 business days, and longer over race weekends and holidays. There
+is no telephone support and no guaranteed resolution time.
 
-Publisher action required before public release: replace this paragraph with a
-real support email address and response-time policy.
+When reporting an issue, include:
+- the 4G1 Live version (shown next to About in the app header)
+- your Windows version
+- adapter model and firmware version
+- vehicle model, engine, and ECU part number
+- the exact steps that produced the issue
 
+Useful files to attach:
+  Diagnostic log:    %LOCALAPPDATA%\4G1 Live\Logs\4g1-live.log
+  Session telemetry: %LOCALAPPDATA%\4G1 Live\Sessions\
+
+Review both before sharing them and remove anything you do not wish to
+disclose. Session CSVs contain vehicle telemetry from your car.

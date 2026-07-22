@@ -1,15 +1,41 @@
-4G1 LIVE PRIVACY NOTICE — VERSION 1.0.0-rc3
+4G1 LIVE PRIVACY NOTICE
+
+Applies to 4G1 Live 1.0. Effective July 2026.
 
 4G1 Live runs locally on the user's Windows computer. The application does not
 include analytics, advertising, user accounts, cloud sync, or automatic data
-upload. Vehicle telemetry is held in memory unless the user explicitly saves a
-CSV file. Settings and diagnostic logs are stored under %LOCALAPPDATA%\4G1 Live.
+upload. Nothing is transmitted off the computer by the application.
+
+WHAT IS WRITTEN TO DISK
+
+4G1 Live automatically records telemetry. When a live or demo session starts,
+every captured sample is written to a CSV file as it is read, so that a crash or
+power loss cannot lose a session:
+
+  %LOCALAPPDATA%\4G1 Live\Sessions\
+
+These files contain vehicle telemetry (engine speed, temperatures, throttle,
+battery voltage, sensor values and similar) with timestamps. They are kept until
+the user deletes them. "Save CSV" additionally writes a copy to a location the
+user chooses.
+
+Settings are stored at %LOCALAPPDATA%\4G1 Live\settings.json.
+
+Diagnostic logs are stored at %LOCALAPPDATA%\4G1 Live\Logs. They may include
+adapter version, DLL path, selected vehicle profile, and error details. They do
+not intentionally record names, contact details, VINs, or precise location.
+
+THIRD-PARTY COMPONENTS
 
 The software communicates only with a locally installed J2534 vehicle interface
 driver selected by the user. That third-party driver is governed by its vendor's
 own terms and privacy practices.
 
-Users can remove local application data by uninstalling 4G1 Live and deleting
-the %LOCALAPPDATA%\4G1 Live folder. Diagnostic logs may include adapter version,
-DLL path, selected vehicle profile, and error details; they do not intentionally
-record names, contact details, VINs, or precise location.
+REMOVING DATA
+
+Uninstall 4G1 Live and delete the %LOCALAPPDATA%\4G1 Live folder. This removes
+settings, diagnostic logs, and all recorded session telemetry. Any CSV files
+saved elsewhere by the user must be deleted separately.
+
+If a session CSV or diagnostic log is sent to support, review it first and
+remove anything you do not wish to disclose.
