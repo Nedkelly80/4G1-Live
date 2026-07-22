@@ -1,14 +1,51 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Python32 = "C:\Users\trmra\AppData\Local\Programs\Python\Python313-32\python.exe"
-$Iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 
-if (-not (Test-Path -LiteralPath $Python32)) {
-    throw "32-bit Python 3.13 was not found at $Python32"
+# Toolchain discovery. Nothing here may be tied to one machine or one user
+# profile — a release build must work on any build box. Override either path
+# with the FOURG1_PYTHON32 / FOURG1_ISCC environment variables if needed.
+function Find-Python32 {
+    if ($env:FOURG1_PYTHON32 -and (Test-Path -LiteralPath $env:FOURG1_PYTHON32)) {
+        return $env:FOURG1_PYTHON32
+    }
+    $viaLauncher = & py -3-32 -c "import sys; print(sys.executable)" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $viaLauncher -and (Test-Path -LiteralPath $viaLauncher)) {
+        return $viaLauncher
+    }
+    foreach ($candidate in @(
+        "$env:LOCALAPPDATA\Programs\Python\Python313-32\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python312-32\python.exe",
+        "${env:ProgramFiles(x86)}\Python313-32\python.exe"
+    )) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
 }
-if (-not (Test-Path -LiteralPath $Iscc)) {
-    throw "Inno Setup 6 was not found at $Iscc"
+
+function Find-Iscc {
+    if ($env:FOURG1_ISCC -and (Test-Path -LiteralPath $env:FOURG1_ISCC)) {
+        return $env:FOURG1_ISCC
+    }
+    foreach ($candidate in @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $onPath = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+    if ($onPath) { return $onPath }
+    return $null
+}
+
+$Python32 = Find-Python32
+$Iscc = Find-Iscc
+
+if (-not $Python32) {
+    throw "32-bit Python 3 was not found. Install the x86 build, or set FOURG1_PYTHON32."
+}
+if (-not $Iscc) {
+    throw "Inno Setup 6 was not found. Install it, or set FOURG1_ISCC to ISCC.exe."
 }
 
 Push-Location $Root

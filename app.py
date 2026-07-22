@@ -1564,6 +1564,12 @@ class App(tk.Tk):
         )
         self.codes_box.pack(fill="both", expand=True, padx=18, pady=(0, 18))
         self.codes_box.insert("end", "Connect to the ECU, then press Read Codes.\n\n")
+        self.codes_box.insert(
+            "end",
+            "Note: fault-code support varies by ECU. Codes are read from\n"
+            "requests 0x38/0x39, which on some MUT-II ECUs carry live data\n"
+            "instead. Treat an empty result as inconclusive, not as proof\n"
+            "the vehicle is fault-free.\n\n")
         self.codes_box.insert("end", "Examples:\n")
         self.codes_box.insert("end", "  #11  Oxygen sensor\n")
         self.codes_box.insert("end", "  #21  Engine coolant temperature sensor\n")
@@ -2653,8 +2659,23 @@ class App(tk.Tk):
             self.codes_box.insert("end", "No response from ECU.\n")
             return
         if not codes:
-            self.codes_box.insert("end", "✓  No trouble codes set.\n")
-            self.codes_box.insert("end", "   ECU reports healthy (empty fault mask).\n")
+            # An empty fault mask is NOT proof of a healthy engine. DTC reads
+            # use requests 0x38/0x39, and on some MUT-II ECUs those addresses
+            # serve live data instead of a fault bitmask — on the CE 4G15 this
+            # was developed against, 0x38 returned a constant 0.0 for an entire
+            # running session. Never let this screen imply a clean bill of health.
+            self.codes_box.insert("end", "No trouble codes returned.\n\n")
+            self.codes_box.insert(
+                "end",
+                "This is NOT confirmation that the engine is fault-free.\n\n"
+                "Fault codes are read from requests 0x38/0x39. On some MUT-II\n"
+                "ECUs those addresses carry live data rather than a fault mask,\n"
+                "so an empty result can mean either:\n"
+                "   - no faults are stored, or\n"
+                "   - this ECU does not report faults at those addresses.\n\n"
+                "Confirm with a factory-level scan tool before declaring a\n"
+                "vehicle fault-free. Use Sweep Requests to see what this ECU\n"
+                "actually serves.\n")
             return
         self.codes_box.insert("end", f"{len(codes)} code(s) present:\n\n")
         for code, desc in codes:
