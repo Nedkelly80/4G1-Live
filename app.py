@@ -28,12 +28,21 @@ from product import APP_NAME, VERSION, COPYRIGHT, PRODUCT_DESCRIPTION
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = getattr(sys, "_MEIPASS", SOURCE_DIR)
-USER_DATA_DIR = os.path.join(
-    os.environ.get("LOCALAPPDATA", SOURCE_DIR), "4G1 Live"
-)
+
+if sys.platform == "darwin":
+    _app_support = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    USER_DATA_DIR = os.path.join(_app_support, "4G1 Live")
+elif sys.platform == "win32":
+    USER_DATA_DIR = os.path.join(
+        os.environ.get("LOCALAPPDATA", SOURCE_DIR), "4G1 Live"
+    )
+else:
+    USER_DATA_DIR = os.path.join(
+        os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share")),
+        "4g1-live",
+    )
+
 LOG_DIR = os.path.join(USER_DATA_DIR, "Logs")
-# Every live/demo session is streamed to its own CSV here as it is captured,
-# so telemetry survives a crash, a stall or an accidental restart.
 SESSION_DIR = os.path.join(USER_DATA_DIR, "Sessions")
 SETTINGS_PATH = os.path.join(USER_DATA_DIR, "settings.json")
 LEGACY_SETTINGS_PATH = os.path.join(SOURCE_DIR, "settings.json")
@@ -196,18 +205,24 @@ def ui_font(theme, size, bold=False, mono=False):
     return (family, size, "bold") if bold else (family, size)
 
 
+def _default_adapter_path():
+    if sys.platform == "darwin":
+        import tactrix_mac
+        return tactrix_mac.default_port() or ""
+    return j2534.default_dll()
+
+
 DEFAULTS = dict(
     theme="4G1 Red",
     style="Dial",
     gauge_scale=100,
     gauges=[hex(g) for g in j2534.DEFAULT_GAUGES],
     poll_hz=12,
-    # primary product target; switch to 4g93_maf when live on 1.8 MAF
     vehicle_profile=j2534.DEFAULT_PROFILE_ID,
     # --- connection ---
-    dll_path=j2534.default_dll(),
+    dll_path=_default_adapter_path(),
     mut_baud=15625,
-    pin1_ground=True,          # required for CE Lancer / Mirage
+    pin1_ground=True,
     init_addr="0x00",
     init_attempts=5,
     request_timeout_ms=400,
@@ -1030,11 +1045,12 @@ class App(tk.Tk):
 
     def _set_app_icon(self):
         """Window + taskbar icon from 4G1 badge artwork."""
-        try:
-            if os.path.isfile(ICON_PATH):
-                self.iconbitmap(ICON_PATH)
-        except Exception:
-            pass
+        if sys.platform == "win32":
+            try:
+                if os.path.isfile(ICON_PATH):
+                    self.iconbitmap(ICON_PATH)
+            except Exception:
+                pass
         # iconphoto gives a sharper taskbar/title icon on modern Tk (PNG)
         for path in (MARK_PATH, LOGO_PATH, SOURCE_LOGO_PATH):
             if not os.path.isfile(path):
@@ -1317,9 +1333,15 @@ class App(tk.Tk):
 
     def _conn_summary(self):
         s = self.settings
-        dll = os.path.basename(s.get("dll_path") or "op20pt32.dll")
         pin = "Pin1 GND" if s.get("pin1_ground", True) else "Pin1 off"
         prof = j2534.get_profile(s.get("vehicle_profile"))["short"]
+        if sys.platform == "darwin":
+            port = os.path.basename(s.get("dll_path") or "not detected")
+            return (
+                f"{prof}  ·  Serial  ·  {port}  ·  MUT-II  ·  "
+                f"{s.get('mut_baud', 15625)} baud  ·  {pin}"
+            )
+        dll = os.path.basename(s.get("dll_path") or "op20pt32.dll")
         return (
             f"{prof}  ·  J2534  ·  {dll}  ·  MUT-II  ·  "
             f"{s.get('mut_baud', 15625)} baud  ·  {pin}"
@@ -1622,7 +1644,10 @@ class App(tk.Tk):
         scroll.pack(side="right", fill="y")
 
         def _wheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            if sys.platform == "darwin":
+                canvas.yview_scroll(int(-1 * e.delta), "units")
+            else:
+                canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
 
         def _bind_wheel(_e=None):
             canvas.bind_all("<MouseWheel>", _wheel)
@@ -1784,7 +1809,9 @@ class App(tk.Tk):
         head.pack(fill="x", padx=16, pady=(12, 4))
         tk.Label(head, text="CONNECTION", bg=t["panel"], fg=t["dim"],
                  font=ui_font(t, 8, bold=True)).pack(side="left")
-        tk.Label(head, text="J2534 adapter  ·  MUT-II session", bg=t["panel"],
+        conn_hint = ("Tactrix serial  ·  MUT-II session" if sys.platform == "darwin"
+                     else "J2534 adapter  ·  MUT-II session")
+        tk.Label(head, text=conn_hint, bg=t["panel"],
                  fg=t["muted"], font=ui_font(t, 8)).pack(side="right")
 
         advanced_toggle = tk.Frame(ccard, bg=t["panel"])
@@ -1813,12 +1840,18 @@ class App(tk.Tk):
                  bg=t["panel"], fg=t["muted"], font=ui_font(t, 8)).pack(
                      side="left", padx=10)
 
-        # DLL path
+        # Adapter path — DLL on Windows, serial port on macOS
         dll_row = tk.Frame(advanced, bg=t["panel"])
         dll_row.pack(fill="x", padx=16, pady=4)
-        tk.Label(dll_row, text="J2534 DLL", bg=t["panel"], fg=t["fg"],
+        if sys.platform == "darwin":
+            adapter_label = "Serial port"
+            adapter_default = self.settings.get("dll_path") or _default_adapter_path()
+        else:
+            adapter_label = "J2534 DLL"
+            adapter_default = self.settings.get("dll_path") or j2534.default_dll()
+        tk.Label(dll_row, text=adapter_label, bg=t["panel"], fg=t["fg"],
                  font=ui_font(t, 9), width=16, anchor="w").pack(side="left")
-        self.dll_var = tk.StringVar(value=self.settings.get("dll_path") or j2534.default_dll())
+        self.dll_var = tk.StringVar(value=adapter_default)
         dll_entry = tk.Entry(dll_row, textvariable=self.dll_var, bg=t["elev"], fg=t["fg"],
                              insertbackground=t["fg"], relief="flat", font=ui_font(t, 9, mono=True),
                              width=48)
@@ -1947,15 +1980,44 @@ class App(tk.Tk):
                    primary=False).pack(side="left", padx=8)
 
     def _browse_dll(self):
-        path = filedialog.askopenfilename(
-            title="Select J2534 DLL",
-            filetypes=[("DLL files", "*.dll"), ("All files", "*.*")],
-            initialdir=r"C:\Windows\SysWOW64",
-        )
+        if sys.platform == "darwin":
+            path = filedialog.askopenfilename(
+                title="Select serial port",
+                initialdir="/dev",
+            )
+        else:
+            path = filedialog.askopenfilename(
+                title="Select J2534 DLL",
+                filetypes=[("DLL files", "*.dll"), ("All files", "*.*")],
+                initialdir=r"C:\Windows\SysWOW64",
+            )
         if path:
             self.dll_var.set(path)
 
     def _detect_dll(self):
+        if sys.platform == "darwin":
+            import tactrix_mac
+            devices = tactrix_mac.find_openport_usb()
+            if not devices:
+                messagebox.showwarning(
+                    "4G1 Live",
+                    "No Tactrix OpenPort 2.0 detected.\n\n"
+                    "Connect the cable and check System Information → USB.",
+                )
+                return
+            d = devices[0]
+            port = d.get("port_path") or ""
+            self.dll_var.set(port)
+            info = (
+                f"Tactrix {d['product']}\n"
+                f"Serial: {d.get('serial', '—')}\n"
+                f"Port: {port}\n"
+                f"USB: {d['vendor_id']:04X}:{d['product_id']:04X}"
+            )
+            if len(devices) > 1:
+                info += f"\n\n({len(devices)} devices found, using first)"
+            messagebox.showinfo("4G1 Live — Tactrix Detected", info)
+            return
         found = j2534.find_j2534_dlls()
         if not found:
             messagebox.showwarning("4G1 Live", "No known J2534 DLLs found.\nBrowse manually.")
@@ -2155,9 +2217,9 @@ class App(tk.Tk):
             return
         try:
             kw = self._conn_kwargs()
-            if not os.path.isfile(kw["dll_path"]):
-                raise j2534.J2534Error(f"DLL not found:\n{kw['dll_path']}\n\nSet path in Settings → Connection.")
-            self.dev = j2534.Device(**kw)
+            if sys.platform == "win32" and not os.path.isfile(kw.get("dll_path", "")):
+                raise j2534.J2534Error(f"DLL not found:\n{kw.get('dll_path')}\n\nSet path in Settings → Connection.")
+            self.dev = j2534.create_device(**kw)
             self.dev.open()
             fw, dl, ap = self.dev.version()
             mv = self.dev.battery_mv() or 0

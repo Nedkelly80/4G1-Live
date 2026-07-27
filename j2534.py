@@ -13,6 +13,7 @@ raw NTC ADC values and must be converted with a thermistor table â€” not plain Â
 """
 
 import ctypes as ct
+import sys
 
 REAL_DLL = r"C:\Windows\SysWOW64\op20pt32.dll"
 
@@ -58,7 +59,9 @@ COMMON_DLLS = [
 
 
 def find_j2534_dlls():
-    """Return list of existing candidate DLL paths."""
+    """Return list of existing candidate DLL paths (Windows only)."""
+    if sys.platform != "win32":
+        return []
     import os
     found = []
     for p in COMMON_DLLS:
@@ -68,6 +71,8 @@ def find_j2534_dlls():
 
 
 def default_dll():
+    if sys.platform != "win32":
+        return ""
     found = find_j2534_dlls()
     return found[0] if found else REAL_DLL
 
@@ -95,10 +100,24 @@ class J2534Error(Exception):
     pass
 
 
+def create_device(**kwargs):
+    """Return the right Device for this platform (J2534 on Windows, serial on macOS)."""
+    if sys.platform == "darwin":
+        import tactrix_mac
+        port = kwargs.pop("dll_path", None) or kwargs.pop("port_path", None)
+        return tactrix_mac.Device(port_path=port, **kwargs)
+    return Device(**kwargs)
+
+
 class Device:
     """Thin, safe wrapper over the OpenPort J2534 DLL."""
 
     def __init__(self, dll_path=None, baud=None, request_timeout_ms=400):
+        if sys.platform != "win32":
+            raise J2534Error(
+                "J2534 DLL interface is Windows-only.\n"
+                "Use j2534.create_device() for cross-platform support."
+            )
         self.dll_path = dll_path or default_dll()
         self.baud = int(baud or MUT_BAUD)
         self.request_timeout_ms = int(request_timeout_ms)
