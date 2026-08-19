@@ -10,3 +10,12 @@ releases/
 
 # Per-machine runtime config written by the app (real defaults live in app.py)
 settings.json
+
+# Local safety copies made before risky edits - not history, git is the history
+*.bak
+*.xpbak
+*.bak-before-*
+.manus-*/
+
+# pytest run cache
+.pytest_cache/

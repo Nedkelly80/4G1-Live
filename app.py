@@ -24,23 +24,46 @@ from tkinter import ttk, messagebox, filedialog
 
 import j2534
 import sweep
-from product import APP_NAME, VERSION, COPYRIGHT, PRODUCT_DESCRIPTION
+import baseline
+import ai_assistant
+import memory as ai_memory
+import knowledge as ai_knowledge
+import tactrix_log
+import voice
+import speech_vocab
+from product import APP_NAME, APP_ID, VERSION, COPYRIGHT, PRODUCT_DESCRIPTION
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = getattr(sys, "_MEIPASS", SOURCE_DIR)
 USER_DATA_DIR = os.path.join(
-    os.environ.get("LOCALAPPDATA", SOURCE_DIR), "4G1 Live"
+    os.environ.get("LOCALAPPDATA", SOURCE_DIR), APP_NAME
 )
 LOG_DIR = os.path.join(USER_DATA_DIR, "Logs")
-# Every live/demo session is streamed to its own CSV here as it is captured,
+# Every live session is streamed to its own CSV here as it is captured,
 # so telemetry survives a crash, a stall or an accidental restart.
 SESSION_DIR = os.path.join(USER_DATA_DIR, "Sessions")
+TACTRIX_SESSION_DIR = os.path.join(USER_DATA_DIR, "Tactrix Sessions")
 SETTINGS_PATH = os.path.join(USER_DATA_DIR, "settings.json")
 LEGACY_SETTINGS_PATH = os.path.join(SOURCE_DIR, "settings.json")
+# Learned per-car sensor baseline, rebuilt from Sessions CSVs — see baseline.py
+BASELINE_PATH = os.path.join(USER_DATA_DIR, "baseline.json")
+# Durable AI memory (name, car notes, lessons) — survives restarts; see memory.py
+MEMORY_PATH = os.path.join(USER_DATA_DIR, "memory.json")
+# xAI Collections manuals index — see knowledge.py
+KNOWLEDGE_PATH = os.path.join(USER_DATA_DIR, "knowledge.json")
 ICON_PATH = os.path.join(APP_DIR, "4g1.ico")          # window / taskbar (.ico)
 LOGO_PATH = os.path.join(APP_DIR, "4g1_logo.png")     # settings brand preview
 MARK_PATH = os.path.join(APP_DIR, "4g1_mark.png")     # header badge
 SOURCE_LOGO_PATH = os.path.join(APP_DIR, "4g1.icon.png")  # master artwork
+
+# Legacy Claude model ids from early personal builds — map to Grok on load.
+_LEGACY_AI_MODELS = {
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-sonnet-4",
+    "claude-3-5-sonnet-latest",
+    "claude-3-opus-latest",
+}
 
 
 def _configure_logging():
@@ -79,6 +102,42 @@ BAUD_PRESETS = ["15625", "10400", "9600", "4800"]
 # Optional keys: font, mono, xp, title, title2 (Windows XP chrome), brand2
 # (secondary brand accent used for the "LIVE" wordmark in the header)
 THEMES = {
+    "Windows XP": dict(
+        # Exact colouring from the Edge 4G1 Live HTML mockup
+        # (Windows XP Luna — grey edition). Gauges are mini XP windows.
+        bg="#3A6EA5",                 # Luna desktop / workspace blue
+        panel="#F4F4F4",              # mockup body grey
+        panel2="#FFFFFF",             # white fields / selected tab face
+        elev="#EFEFEF",               # toolbar / button face
+        fg="#000000",
+        dim="#0046D5",                # mockup legend / group headers
+        muted="#555555",
+        accent="#1049B5",             # mockup tile value blue
+        accent_hi="#3F8CF3",          # Luna caption highlight
+        accent2="#003C74",
+        good="#0A7B26",
+        warn="#B07000",
+        bad="#CC0000",
+        border="#0855DD",             # mockup window chrome
+        chart="#FFFFFF",
+        glow="#245EDC33",
+        tab_sel="#FFFFFF",
+        tab_bar="#EFEFEF",
+        title="#0A246A",              # caption navy
+        title2="#3F8CF3",             # caption top stop
+        brand2="#FFE45A",             # "LIVE" gold on blue title bar
+        value="#1049B5",              # live numbers
+        win_border="#0855DD",
+        button_face="#F2F2F2",
+        button_hi="#FFF8E3",
+        button_shadow="#BFBFBF",
+        button_dk="#003C74",
+        font="Tahoma",
+        mono="Lucida Console",
+        font_choices=("Tahoma", "MS Sans Serif", "Segoe UI"),
+        mono_choices=("Lucida Console", "Consolas", "Courier New"),
+        xp=True,
+    ),
     "4G1 Red": dict(
         # Premium dark chrome inspired by the box art, tuned for better depth.
         bg="#08090d", panel="#10131a", panel2="#171b24", elev="#212734",
@@ -90,18 +149,6 @@ THEMES = {
         brand2="#4cb7ff",
         font_choices=("Eurostile", "Bahnschrift", "Segoe UI Semibold", "Segoe UI"),
         mono_choices=("JetBrains Mono", "Cascadia Mono", "Consolas"),
-    ),
-    "Windows XP": dict(
-        # Classic Luna Blue — beige chrome, blue accents, Tahoma UI
-        bg="#9DB9EB", panel="#ECE9D8", panel2="#FFFFFF", elev="#C2D5F2",
-        fg="#000000", dim="#0A246A", muted="#5A574B",
-        accent="#245EDC", accent_hi="#3C8CF0", accent2="#003C74",
-        good="#008000", warn="#E56717", bad="#C00000",
-        border="#0A246A", chart="#F8FBFF",
-        glow="#245EDC33", tab_sel="#FFFFFF",
-        title="#0A246A", title2="#3A8CF0",
-        font="Tahoma", mono="Lucida Console",
-        xp=True,
     ),
     "Precision Dark": dict(
         bg="#07111a", panel="#0b1721", panel2="#101f2b", elev="#172a38",
@@ -197,7 +244,7 @@ def ui_font(theme, size, bold=False, mono=False):
 
 
 DEFAULTS = dict(
-    theme="4G1 Red",
+    theme="Windows XP",
     style="Dial",
     gauge_scale=100,
     gauges=[hex(g) for g in j2534.DEFAULT_GAUGES],
@@ -213,7 +260,104 @@ DEFAULTS = dict(
     request_timeout_ms=400,
     auto_connect=False,
     auto_live=False,
+    # --- AI assistant (personal edition) ---
+    ai_enabled=True,
+    ai_model=ai_assistant.DEFAULT_MODEL,
+    ai_user_name=ai_memory.DEFAULT_USER_NAME,
+    ai_collection_id="",  # optional override / paste from console.x.ai
+    voice_enabled=True,
 )
+
+# API keys live here — never commit. Loaded into os.environ at startup.
+SECRETS_PATH = os.path.join(USER_DATA_DIR, "secrets.env")
+SECRETS_EXAMPLE_PATH = os.path.join(SOURCE_DIR, "secrets.env.example")
+
+
+def load_secrets():
+    """Load KEY=VALUE pairs into os.environ (does not overwrite existing env).
+
+    AI can also authenticate via Grok Build login (~/.grok/auth.json) — see
+    ai_assistant.resolve_api_key() — so no manual console key is required.
+    """
+    for path in (SECRETS_PATH, os.path.join(SOURCE_DIR, "secrets.env"),
+                 os.path.join(SOURCE_DIR, ".env")):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    if key and val and key not in os.environ:
+                        os.environ[key] = val
+            logging.info("Loaded secrets from %s", path)
+        except Exception:
+            logging.exception("Could not read secrets from %s", path)
+    # If secrets.env holds a rejected/garbage key, clear it so Grok login wins
+    env_key = (os.environ.get("XAI_API_KEY") or "").strip()
+    if env_key and not (env_key.startswith("xai-") or env_key.startswith("eyJ")):
+        logging.info("Ignoring non-xAI XAI_API_KEY value")
+        os.environ.pop("XAI_API_KEY", None)
+    try:
+        logging.info("AI auth: %s", ai_assistant.auth_status())
+    except Exception:
+        logging.exception("AI auth status check failed")
+
+
+def save_secrets(updates):
+    """Merge KEY=VALUE into SECRETS_PATH and os.environ. Empty values remove keys."""
+    existing = {}
+    if os.path.isfile(SECRETS_PATH):
+        try:
+            with open(SECRETS_PATH, encoding="utf-8-sig") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    existing[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception:
+            logging.exception("Could not read existing secrets")
+    for k, v in (updates or {}).items():
+        v = (v or "").strip()
+        if v:
+            existing[k] = v
+            os.environ[k] = v
+        else:
+            existing.pop(k, None)
+            os.environ.pop(k, None)
+    try:
+        os.makedirs(USER_DATA_DIR, exist_ok=True)
+        lines = [
+            "# 4G1 Live AI secrets — do not share or commit",
+            f"# updated {time.strftime('%Y-%m-%d %H:%M')}",
+        ]
+        for k in sorted(existing):
+            lines.append(f"{k}={existing[k]}")
+        temp = SECRETS_PATH + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(temp, SECRETS_PATH)
+    except Exception:
+        logging.exception("Could not write secrets to %s", SECRETS_PATH)
+
+
+def api_key_status():
+    """Short UI line for whether Grok credentials are present."""
+    try:
+        auth = ai_assistant.auth_status()
+    except Exception:
+        auth = "unknown"
+    mgmt = bool(os.environ.get("XAI_MANAGEMENT_API_KEY"))
+    bits = [
+        f"AI auth: {auth}",
+        f"MANAGEMENT={'OK' if mgmt else 'optional until manuals'}",
+    ]
+    return "  ·  ".join(bits)
 
 
 def load_settings():
@@ -232,6 +376,20 @@ def load_settings():
     # migrate / clamp unknown profile ids to primary 4G15 12V
     if s.get("vehicle_profile") not in j2534.VEHICLE_PROFILES:
         s["vehicle_profile"] = j2534.DEFAULT_PROFILE_ID
+    # migrate Claude-era model setting to Grok
+    if s.get("ai_model") in _LEGACY_AI_MODELS or not s.get("ai_model"):
+        s["ai_model"] = ai_assistant.DEFAULT_MODEL
+    # Promote old installed defaults to the current flagship, but never
+    # override a model that the user explicitly chose in Settings.
+    if (
+        s.get("ai_model") in ("grok-4.5", "grok-4.20-0309-non-reasoning", "", None)
+        and s.get("_ai_model_user_set") is not True
+    ):
+        s["ai_model"] = ai_assistant.DEFAULT_MODEL
+    if not (s.get("ai_user_name") or "").strip():
+        s["ai_user_name"] = ai_memory.DEFAULT_USER_NAME
+    if s.get("theme") not in THEMES:
+        s["theme"] = "Windows XP"
     return s
 
 
@@ -272,7 +430,7 @@ def _blend_hex(c1, c2, t):
 
 # ---------------------------------------------------------------- soft button
 class SoftButton(tk.Frame):
-    """Flat button with hover + disabled states."""
+    """Flat button with hover + disabled states (classic 3D when theme is XP)."""
 
     def __init__(self, master, text, command, theme, primary=False, **kw):
         super().__init__(master, bg=theme.get("panel", theme["bg"]), **kw)
@@ -280,42 +438,90 @@ class SoftButton(tk.Frame):
         self.primary = primary
         self.command = command
         self._enabled = True
+        self._pressed = False
         t = theme
-        if primary:
-            self.bg0, self.bg1, self.fg = t["accent"], t["accent_hi"], "#ffffff"
-        else:
-            self.bg0, self.bg1, self.fg = t["panel2"], t["elev"], t["fg"]
-        self.lbl = tk.Label(
-            self, text=text, bg=self.bg0, fg=self.fg,
-            font=ui_font(t, 9, bold=True), padx=14, pady=5, cursor="hand2",
-        )
-        self.lbl.pack()
-        # Classic XP-style raised edge on secondary buttons
-        if t.get("xp") and not primary:
-            self.configure(highlightbackground="#FFFFFF", highlightthickness=1)
-            self.lbl.configure(
-                highlightbackground=t["border"], highlightthickness=1,
-                relief="raised", bd=1,
+        if t.get("xp"):
+            # Classic Luna command buttons. Never inherit title-bar white
+            # text — that made Connect / Live Data invisible on the navy header.
+            if primary:
+                self.bg0 = t.get("accent", "#245EDC")
+                self.bg1 = t.get("accent_hi", "#3C8CF0")
+                self.fg = "#FFFFFF"
+            else:
+                self.bg0 = t.get("button_face", "#FFFFFF")
+                self.bg1 = t.get("button_hi", "#FFF8E3")
+                self.fg = "#000000"
+            self._disabled_bg = "#D4D0C8"
+            self._disabled_fg = "#404040"
+            self.lbl = tk.Label(
+                self, text=text, bg=self.bg0, fg=self.fg,
+                font=ui_font(t, 10, bold=True), padx=16, pady=5, cursor="hand2",
+                relief="raised", bd=2,
             )
-        elif not primary:
-            self.configure(highlightbackground=t["border"], highlightthickness=1)
-            self.lbl.configure(highlightthickness=0)
-        for w in (self, self.lbl):
-            w.bind("<Enter>", self._enter)
-            w.bind("<Leave>", self._leave)
-            w.bind("<Button-1>", self._click)
+            self.lbl.pack()
+            self.configure(highlightthickness=0, bd=0)
+        else:
+            if primary:
+                self.bg0, self.bg1, self.fg = t["accent"], t["accent_hi"], "#ffffff"
+            else:
+                self.bg0, self.bg1, self.fg = t["panel2"], t["elev"], t["fg"]
+            self.lbl = tk.Label(
+                self, text=text, bg=self.bg0, fg=self.fg,
+                font=ui_font(t, 9, bold=True), padx=14, pady=5, cursor="hand2",
+            )
+            self.lbl.pack()
+            if not primary:
+                self.configure(highlightbackground=t["border"], highlightthickness=1)
+                self.lbl.configure(highlightthickness=0)
+        # Bind only the label (the visible button). Fire command once on release
+        # so XP press/sunken animation works without double-firing.
+        self.lbl.bind("<Enter>", self._enter)
+        self.lbl.bind("<Leave>", self._leave)
+        self.lbl.bind("<ButtonPress-1>", self._press)
+        self.lbl.bind("<ButtonRelease-1>", self._release_click)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+
+    def _press(self, _=None):
+        if not self._enabled:
+            return
+        self._pressed = True
+        if self.theme.get("xp"):
+            try:
+                self.lbl.config(relief="sunken")
+            except Exception:
+                pass
+
+    def _release_click(self, _=None):
+        if self.theme.get("xp"):
+            try:
+                self.lbl.config(relief="raised")
+            except Exception:
+                pass
+        if not self._enabled:
+            return
+        if getattr(self, "_pressed", False) and self.command:
+            self._pressed = False
+            try:
+                self.command()
+            except Exception:
+                # Never let a button callback kill the whole app silently.
+                logging.exception("SoftButton command failed: %s", getattr(self.lbl, "cget", lambda *_: "?")("text"))
+                raise
 
     def _enter(self, _=None):
         if self._enabled:
             self.lbl.config(bg=self.bg1)
 
     def _leave(self, _=None):
+        self._pressed = False
         if self._enabled:
             self.lbl.config(bg=self.bg0)
-
-    def _click(self, _=None):
-        if self._enabled and self.command:
-            self.command()
+            if self.theme.get("xp"):
+                try:
+                    self.lbl.config(relief="raised")
+                except Exception:
+                    pass
 
     def config(self, **kw):
         if "text" in kw:
@@ -327,7 +533,14 @@ class SoftButton(tk.Frame):
             if self._enabled:
                 self.lbl.config(bg=self.bg0, fg=self.fg, cursor="hand2")
             else:
-                self.lbl.config(bg=t["elev"], fg=t["muted"], cursor="arrow")
+                if t.get("xp"):
+                    self.lbl.config(
+                        bg=getattr(self, "_disabled_bg", "#D4D0C8"),
+                        fg=getattr(self, "_disabled_fg", "#404040"),
+                        cursor="arrow",
+                    )
+                else:
+                    self.lbl.config(bg=t["elev"], fg=t["muted"], cursor="arrow")
         if kw:
             super().config(**kw)
 
@@ -337,12 +550,13 @@ class SoftButton(tk.Frame):
 # ---------------------------------------------------------------- status LED
 def _health_colours(theme):
     """Colours for sensor-status LED: good / bad / warn / idle."""
+    off = "#7a7a7a" if theme.get("xp") else theme.get("elev", "#172a38")
     return {
         "good": theme.get("good", "#34d399"),
         "bad": theme.get("bad", "#ff6474"),
         "warn": theme.get("warn", "#fbbf24"),
         None: theme.get("muted", "#647584"),
-        "off": theme.get("elev", "#172a38"),
+        "off": off,
     }
 
 
@@ -376,11 +590,108 @@ class StatusLED(tk.Canvas):
         )
 
 
+# ---------------------------------------------------------------- xp caption bar
+class XPGaugeTitle(tk.Canvas):
+    """Luna caption that turns a gauge into an XP window (Edge mockup)."""
+
+    _STOPS = ("#3F8CF3", "#2A6CD4", "#1049B5", "#1E5BC8", "#1653B8")
+
+    def __init__(self, master, title, reqid, theme, health=False, height=20, **kw):
+        super().__init__(master, height=height, highlightthickness=0, bd=0, **kw)
+        self.theme = theme
+        self._title = title
+        self._reqid = reqid
+        self._health = health
+        self._status = None
+        self._h = height
+        self.bind("<Configure>", lambda _e: self._paint())
+
+    def set_status(self, status):
+        if not self._health or status == self._status:
+            return
+        self._status = status
+        self._paint()
+
+    def _paint(self):
+        self.delete("all")
+        w = max(self.winfo_width(), 8)
+        h = max(self.winfo_height(), self._h)
+        stops = self._STOPS
+        n = len(stops) - 1
+        for y in range(h):
+            f = y / max(1, h - 1)
+            seg = min(n - 1, int(f * n))
+            col = _blend_hex(stops[seg], stops[seg + 1], f * n - seg)
+            self.create_line(0, y, w, y, fill=col)
+        fnt = ui_font(self.theme, 8, bold=True)
+        self.create_text(8, h // 2 + 1, text=self._title, anchor="w",
+                         fill="#0A2464", font=fnt)
+        self.create_text(7, h // 2, text=self._title, anchor="w",
+                         fill="#FFFFFF", font=fnt)
+        rx = w - 5
+        if self._health:
+            cols = _health_colours(self.theme)
+            fill = cols.get(self._status, cols["off"])
+            r, cy = 4, h // 2
+            self.create_oval(rx - 2 * r, cy - r, rx, cy + r,
+                             fill=fill, outline="#0A2464")
+            rx -= (2 * r + 7)
+        if self._reqid:
+            self.create_text(rx, h // 2, text=self._reqid, anchor="e",
+                             fill="#DCEAFF", font=ui_font(self.theme, 7))
+
+
+class LcdReadout(tk.Frame):
+    """Green LCD RPM tile from the Edge 4G1 Live mockup."""
+
+    def __init__(self, master, theme, unit="rpm", **kw):
+        super().__init__(
+            master, bg="#0B0F0B",
+            highlightbackground="#686868", highlightthickness=1, **kw,
+        )
+        inner = tk.Frame(self, bg="#0B0F0B")
+        inner.pack(fill="both", expand=True, padx=10, pady=10)
+        row = tk.Frame(inner, bg="#0B0F0B")
+        row.pack(expand=True)
+        self.val = tk.Label(
+            row, text="----", bg="#0B0F0B", fg="#39FF5C",
+            font=ui_font(theme, 34, bold=True, mono=True),
+        )
+        self.val.pack(side="left")
+        self.unit = tk.Label(
+            row, text=unit, bg="#0B0F0B", fg="#3f7a4a",
+            font=ui_font(theme, 9, mono=True),
+        )
+        self.unit.pack(side="left", padx=(8, 0), pady=(12, 0))
+        self.shift = tk.Canvas(
+            row, width=15, height=15, bg="#0B0F0B", highlightthickness=0,
+        )
+        self.shift.pack(side="left", padx=(8, 0), pady=(8, 0))
+        self._paint_shift(False)
+
+    def set_text(self, text, health=None, rpm=None):
+        if health == "bad":
+            fg = "#FF3B3B"
+        elif health == "warn":
+            fg = "#FFC63A"
+        else:
+            fg = "#39FF5C"
+        self.val.config(text=text, fg=fg)
+        if rpm is not None:
+            self._paint_shift(float(rpm) >= 6800)
+
+    def _paint_shift(self, on):
+        self.shift.delete("all")
+        fill = "#E81123" if on else "#3a2a2a"
+        outline = "#8a0000" if on else "#555555"
+        self.shift.create_oval(1, 1, 13, 13, fill=fill, outline=outline, width=2)
+
+
 # ---------------------------------------------------------------- hero vital tile
 class HeroTile(tk.Frame):
     """Large KPI tile for the top vitals strip."""
 
-    def __init__(self, master, pid, theme, **kw):
+    def __init__(self, master, pid, theme, caption=True, **kw):
         super().__init__(master, bg=theme["panel"], **kw)
         self.pid = pid
         self.theme = theme
@@ -391,35 +702,63 @@ class HeroTile(tk.Frame):
         self._target = None
         self._health = None
         self.history = collections.deque(maxlen=24)
-        self.configure(highlightbackground=theme["border"], highlightthickness=1)
-        self.strip = tk.Frame(self, bg=theme["border"], height=2)
-        self.strip.pack(fill="x")
-
-        body = tk.Frame(self, bg=theme["panel"])
-        body.pack(fill="both", expand=True, padx=12, pady=(6, 8))
-
-        title_row = tk.Frame(body, bg=theme["panel"])
-        title_row.pack(fill="x")
-        tk.Label(title_row, text=name.upper(), bg=theme["panel"], fg=theme["dim"],
-                 font=ui_font(theme, 8, bold=True), anchor="w").pack(side="left")
-        if pid in j2534.HEALTH_PIDS:
-            self.led = StatusLED(title_row, theme, size=9)
-            self.led.pack(side="right", padx=(4, 0))
-        else:
+        self.lcd = None
+        self.bar = None
+        health = pid in j2534.HEALTH_PIDS
+        xp = bool(theme.get("xp"))
+        use_caption = bool(caption) and xp
+        if use_caption:
+            self.configure(
+                highlightbackground=theme.get("win_border", "#0855DD"),
+                highlightthickness=2, highlightcolor=theme.get("win_border", "#0855DD"),
+                bd=0,
+            )
+            self.strip = XPGaugeTitle(
+                self, name.upper(), f"0x{pid:02X}", theme, health=health)
+            self.strip.pack(fill="x")
+            self.led = self.strip if health else None
+            body = tk.Frame(self, bg=theme["panel"])
+            body.pack(fill="both", expand=True, padx=10, pady=(8, 10))
+        elif xp:
+            self.configure(highlightthickness=0, bd=0, bg=theme["panel"])
+            self.strip = None
             self.led = None
+            body = tk.Frame(self, bg=theme["panel"])
+            body.pack(fill="both", expand=True)
+        else:
+            self.configure(highlightbackground=theme["border"], highlightthickness=1)
+            self.strip = tk.Frame(self, bg=theme["border"], height=2)
+            self.strip.pack(fill="x")
+            body = tk.Frame(self, bg=theme["panel"])
+            body.pack(fill="both", expand=True, padx=12, pady=(6, 8))
+            title_row = tk.Frame(body, bg=theme["panel"])
+            title_row.pack(fill="x")
+            tk.Label(title_row, text=name.upper(), bg=theme["panel"], fg=theme["dim"],
+                     font=ui_font(theme, 8, bold=True), anchor="w").pack(side="left")
+            if health:
+                self.led = StatusLED(title_row, theme, size=9)
+                self.led.pack(side="right", padx=(4, 0))
+            else:
+                self.led = None
 
-        row = tk.Frame(body, bg=theme["panel"])
-        row.pack(fill="x", pady=(0, 0))
-        self.val = tk.Label(row, text="—", bg=theme["panel"], fg=theme["muted"],
-                            font=ui_font(theme, 24, bold=True, mono=True), anchor="w")
-        self.val.pack(side="left")
-        unit_text = "" if units == "state" else units
-        self.unit = tk.Label(row, text=unit_text, bg=theme["panel"], fg=theme["muted"],
-                             font=ui_font(theme, 9), anchor="sw")
-        self.unit.pack(side="left", padx=(5, 0), pady=(0, 2))
-
-        self.bar = tk.Canvas(body, height=2, bg=theme["elev"], highlightthickness=0)
-        self.bar.pack(fill="x", pady=(6, 0))
+        if xp and (pid == 0x21 or units == "rpm"):
+            self.lcd = LcdReadout(body, theme, unit="rpm")
+            self.lcd.pack(fill="both", expand=True)
+            self.val = self.lcd.val
+            self.unit = self.lcd.unit
+        else:
+            row = tk.Frame(body, bg=theme["panel"])
+            row.pack(fill="x", pady=(0, 0))
+            idle = theme.get("value", theme["fg"]) if xp else theme["muted"]
+            self.val = tk.Label(row, text="----", bg=theme["panel"], fg=idle,
+                                font=ui_font(theme, 26, bold=True, mono=True), anchor="w")
+            self.val.pack(side="left", pady=(4, 0))
+            unit_text = "" if units == "state" else units
+            self.unit = tk.Label(row, text=unit_text, bg=theme["panel"], fg=theme["muted"],
+                                 font=ui_font(theme, 9), anchor="sw")
+            self.unit.pack(side="left", padx=(5, 0), pady=(0, 2))
+            self.bar = tk.Canvas(body, height=2, bg=theme["elev"], highlightthickness=0)
+            self.bar.pack(fill="x", pady=(6, 0))
 
     def set(self, value, ctx=None):
         self._target = value
@@ -437,7 +776,7 @@ class HeroTile(tk.Frame):
         t = self.theme
         span = self.gmax - self.gmin
         frac = 0.0 if span <= 0 else max(0.0, min(1.0, (value - self.gmin) / span))
-        col = t["fg"]
+        col = t.get("value", t["fg"]) if t.get("xp") else t["fg"]
         if self._health == "bad":
             col = t["bad"]
         elif self._health == "warn":
@@ -453,12 +792,17 @@ class HeroTile(tk.Frame):
             txt = f"{value:.0f}"
         else:
             txt = f"{value:.1f}"
-        self.val.config(text=txt, fg=col)
+        if self.lcd is not None:
+            self.lcd.set_text(txt, health=self._health, rpm=value)
+        else:
+            self.val.config(text=txt, fg=col)
 
         if self.led is not None:
             self.led.set_status(self._health)
 
         c = self.bar
+        if c is None:
+            return
         c.delete("all")
         w = max(c.winfo_width(), 40)
         bar_col = t["accent"]
@@ -470,7 +814,8 @@ class HeroTile(tk.Frame):
             bar_col = t["warn"]
         c.create_rectangle(0, 0, w, 3, fill=t["elev"], outline="")
         c.create_rectangle(0, 0, max(2, int(w * frac)), 3, fill=bar_col, outline="")
-        self.strip.config(bg=bar_col)
+        if not t.get("xp"):
+            self.strip.config(bg=bar_col)
 
 
 # ---------------------------------------------------------------- gauge widget
@@ -488,32 +833,49 @@ class Gauge(tk.Frame):
         self._display = None
         self._health = None
         self.history = collections.deque(maxlen=48)
-        self.configure(highlightbackground=theme["border"], highlightthickness=1)
+        if theme.get("xp"):
+            self.configure(
+                highlightbackground=theme.get("win_border", "#0855DD"),
+                highlightthickness=2, highlightcolor=theme.get("win_border", "#0855DD"),
+                bd=0,
+            )
+        else:
+            self.configure(highlightbackground=theme["border"], highlightthickness=1)
         self._build()
 
     def _build(self):
         t = self.theme
-        self.strip = tk.Frame(self, bg=t["border"], height=2)
-        self.strip.pack(fill="x")
-        body = tk.Frame(self, bg=t["panel"])
-        body.pack(side="left", fill="both", expand=True)
-        self.body = body
-
-        head = tk.Frame(body, bg=t["panel"])
-        head.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Label(head, text=self.name.upper(), bg=t["panel"], fg=t["dim"],
-                 font=ui_font(t, 8, bold=True), anchor="w").pack(side="left")
-        if self.pid in j2534.HEALTH_PIDS:
-            self.led = StatusLED(head, t, size=9)
-            self.led.pack(side="right", padx=(6, 0))
+        health = self.pid in j2534.HEALTH_PIDS
+        if t.get("xp"):
+            self.strip = XPGaugeTitle(
+                self, self.name.upper(), f"0x{self.pid:02X}", t, health=health)
+            self.strip.pack(fill="x")
+            body = tk.Frame(self, bg=t["panel"])
+            body.pack(side="top", fill="both", expand=True)
+            self.body = body
+            self.led = self.strip if health else None
         else:
-            self.led = None
-        unit_text = "" if self.units == "state" else self.units
-        tk.Label(head, text=unit_text, bg=t["panel"], fg=t["muted"],
-                 font=ui_font(t, 7), anchor="e").pack(side="right")
+            self.strip = tk.Frame(self, bg=t["border"], height=2)
+            self.strip.pack(fill="x")
+            body = tk.Frame(self, bg=t["panel"])
+            body.pack(side="left", fill="both", expand=True)
+            self.body = body
+            head = tk.Frame(body, bg=t["panel"])
+            head.pack(fill="x", padx=12, pady=(8, 0))
+            tk.Label(head, text=self.name.upper(), bg=t["panel"], fg=t["dim"],
+                     font=ui_font(t, 8, bold=True), anchor="w").pack(side="left")
+            if health:
+                self.led = StatusLED(head, t, size=9)
+                self.led.pack(side="right", padx=(6, 0))
+            else:
+                self.led = None
+            unit_text = "" if self.units == "state" else self.units
+            tk.Label(head, text=unit_text, bg=t["panel"], fg=t["muted"],
+                     font=ui_font(t, 7), anchor="e").pack(side="right")
 
+        idle = t.get("value", t["muted"]) if t.get("xp") else t["muted"]
         if self.style == "Digital":
-            self.val = tk.Label(body, text="—", bg=t["panel"], fg=t["muted"],
+            self.val = tk.Label(body, text="—", bg=t["panel"], fg=idle,
                                 font=ui_font(t, 22, bold=True, mono=True), anchor="w")
             self.val.pack(fill="x", padx=12, pady=(0, 0))
             self.spark = tk.Canvas(body, height=10, bg=t["panel"], highlightthickness=0)
@@ -579,17 +941,19 @@ class Gauge(tk.Frame):
         if self._health == "warn":
             return t["warn"]
         if self._health == "good":
-            return t["fg"]
+            return t.get("value", t["fg"]) if t.get("xp") else t["fg"]
         if self.gmin < 0:
             if abs(value) > self.gmax * 0.6:
                 return t["warn"]
-            return t["fg"]
+            return t.get("value", t["fg"]) if t.get("xp") else t["fg"]
         if self.name == "Coolant" and value >= 105:
             return t["bad"]
         if self.name == "Battery" and (value < 11.5 or value > 15.5):
             return t["warn"]
         if frac > 0.88:
             return t["warn"]
+        if t.get("xp"):
+            return t.get("value", "#1049B5")
         return t["fg"]
 
     def set(self, value, ctx=None):
@@ -609,7 +973,8 @@ class Gauge(tk.Frame):
         frac = self._frac(value)
         col = self._colour(value, frac)
         txt = self._fmt(value)
-        self.strip.config(bg=col if col != t["fg"] else t["accent"])
+        if not t.get("xp"):
+            self.strip.config(bg=col if col != t["fg"] else t["accent"])
 
         if self.led is not None:
             self.led.set_status(self._health)
@@ -727,7 +1092,10 @@ class StripChart(tk.Frame):
         self.vmin = 0
         self.accent = accent or theme["accent"]
         self.data = collections.deque(maxlen=npoints)
-        self.configure(highlightbackground=theme["border"], highlightthickness=1)
+        if theme.get("xp"):
+            self.configure(relief="sunken", bd=2, highlightthickness=0)
+        else:
+            self.configure(highlightbackground=theme["border"], highlightthickness=1)
 
         tk.Frame(self, bg=self.accent, height=2).pack(fill="x")
         head = tk.Frame(self, bg=theme["panel"])
@@ -793,17 +1161,31 @@ class StripChart(tk.Frame):
 
 
 # ---------------------------------------------------------------- elevated card
-def card(parent, theme, accent=None):
+def card(parent, theme, accent=None, title=None):
     """A panel with a subtle drop-shadow and coloured top accent strip.
 
     Returns (outer, panel): pack/grid `outer`, build content inside `panel`.
+    On Windows XP theme: nested Luna window matching the Edge mockup.
     """
     t = theme
     outer = tk.Frame(parent, bg=t["bg"])
-    panel = tk.Frame(outer, bg=t["panel"],
-                      highlightbackground=t["border"], highlightthickness=1)
-    panel.pack(fill="both", expand=True, padx=(0, 3), pady=(0, 3))
-    tk.Frame(panel, bg=accent or t["accent"], height=2).pack(fill="x")
+    if t.get("xp"):
+        frame = tk.Frame(
+            outer, bg=t["panel"],
+            highlightbackground=t.get("win_border", "#0855DD"),
+            highlightthickness=2,
+            highlightcolor=t.get("win_border", "#0855DD"),
+        )
+        frame.pack(fill="both", expand=True)
+        if title:
+            XPGaugeTitle(frame, title, "", t, health=False, height=19).pack(fill="x")
+        panel = tk.Frame(frame, bg=t["panel"])
+        panel.pack(fill="both", expand=True)
+    else:
+        panel = tk.Frame(outer, bg=t["panel"],
+                          highlightbackground=t["border"], highlightthickness=1)
+        panel.pack(fill="both", expand=True, padx=(0, 3), pady=(0, 3))
+        tk.Frame(panel, bg=accent or t["accent"], height=2).pack(fill="x")
     return outer, panel
 
 
@@ -821,11 +1203,15 @@ def section_label(parent, text, theme):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        load_secrets()
         self.settings = load_settings()
-        self.theme = dict(THEMES.get(self.settings["theme"], THEMES["4G1 Red"]))
+        # Personal edition default: always land on Windows XP unless user picks another
+        if self.settings.get("theme") not in THEMES:
+            self.settings["theme"] = "Windows XP"
+        self.theme = dict(THEMES.get(self.settings["theme"], THEMES["Windows XP"]))
         self._resolve_theme_fonts()
         prof = j2534.get_profile(self.settings.get("vehicle_profile"))
-        self.title(f"4G1 Live  —  {prof['short']}  ·  MUT-II")
+        self.title(f"{APP_NAME}  —  {prof['short']}  ·  MUT-II")
         self.configure(bg=self.theme["bg"])
         # Fit common laptop screens (was 1180×940 — too tall for many displays)
         self.update_idletasks()
@@ -838,10 +1224,8 @@ class App(tk.Tk):
         win_h = min(768, max(680, sh - 72))
         self.geometry(f"{win_w}x{win_h}")
         self.minsize(960, 640)
-        try:
-            self.state("zoomed")  # full-screen dash by default; autofit trims to suit
-        except Exception:
-            pass
+        # Maximize after first paint — state('zoomed') during __init__ freezes
+        # some Windows/OneDrive desktop sessions and looks like a crash.
         # Responsive fit: extra factor applied on top of the user's gauge
         # scale so the full dashboard stack (heroes, gauge grid, health
         # strip, telemetry log) always fits the screen. 1080-class laptops
@@ -858,7 +1242,6 @@ class App(tk.Tk):
 
         self.dev = None
         self.live = False
-        self.demo = False
         self._closing = False
         self.gauges = {}
         self.heroes = {}
@@ -871,15 +1254,104 @@ class App(tk.Tk):
         self._active_tab = "dash"
         self._session_t0 = None
 
+        # --- AI assistant state (personal edition) ---
+        self._baseline = baseline.load_baseline(BASELINE_PATH)
+        if not self._baseline:
+            self._rebuild_baseline()
+        self._last_verdict = {}
+        self._last_dev = {}
+        self._explain_cooldown = {}
+        self._explain_busy = False
+        self._ai_alerts = []
+        self._trend_flagged = {}
+
+        # Durable long-term memory (name, car notes, lessons) + this-run transcript
+        self._memory = ai_memory.load_memory(MEMORY_PATH)
+        name = (self.settings.get("ai_user_name") or "").strip()
+        if name:
+            ai_memory.set_user_name(self._memory, name)
+        self._session_turns = []  # [{role, content}] this run, for consolidate-on-exit
+        self._memory_dirty = False
+        self._consolidate_busy = False
+
+        # Manuals knowledge base (xAI Collections)
+        self._knowledge = ai_knowledge.load_state(KNOWLEDGE_PATH)
+        override = (self.settings.get("ai_collection_id") or "").strip()
+        if override and override != (self._knowledge.get("collection_id") or ""):
+            ai_knowledge.set_collection_id(self._knowledge, override)
+        seeded = ai_knowledge.seed_local_extracts(self._knowledge)
+        if seeded or override:
+            ai_knowledge.save_state(self._knowledge, KNOWLEDGE_PATH)
+
+        # --- voice / chat I/O (personal edition) — see voice.py ---
+        # Voice is started AFTER the window shows. Opening the mic/COM stack
+        # during __init__ native-crashes or freezes some PCs (looks like a crash).
+        self._ptt_active = False
+        self._ask_busy = False
+        self._voice_busy = False  # alias kept for older call sites
+        self._chat_history = []  # multi-turn chat for this app session (typed + voice)
+        self.voice = None
+
+        logging.info("Building UI…")
         self._build()
+        self.bind_all("<KeyPress-F9>", self._on_ptt_press)
+        self.bind_all("<KeyRelease-F9>", self._on_ptt_release)
+        self.after(50, self._safe_maximize)
+        self.after(80, self._bring_to_front)
         self.after(300, self._set_titlebar_colour)
         self.after(100, self._refresh_ui)
         self.after(280, self._status_tick)
+        self.after(1200, self._init_voice_deferred)
+        self.after(60000, self._check_trend_reminders)
         # honour auto-connect / auto-live from settings
         if self.settings.get("auto_connect"):
-            self.after(500, self.on_connect)
+            self.after(2000, self.on_connect)
         if self.settings.get("auto_live"):
-            self.after(1400, self._auto_live_if_ready)
+            self.after(2800, self._auto_live_if_ready)
+        logging.info("UI ready")
+
+    def _safe_maximize(self):
+        try:
+            self.state("zoomed")
+        except Exception:
+            try:
+                self.attributes("-zoomed", True)
+            except Exception:
+                logging.info("Could not maximize window (non-fatal)")
+
+    def _bring_to_front(self):
+        """Make sure the window is visible after launch (pythonw starts behind
+        other apps often enough that it looks like a failed start)."""
+        try:
+            self.deiconify()
+            self.lift()
+            self.attributes("-topmost", True)
+            self.after(450, lambda: self.attributes("-topmost", False))
+            self.focus_force()
+        except Exception:
+            logging.info("Could not force window to front (non-fatal)")
+
+    def _init_voice_deferred(self):
+        """Start voice after the main window is already visible."""
+        if self._closing:
+            return
+        try:
+            eng = voice.VoiceEngine()
+            if eng.available:
+                # Stage labels: Listening → Transcribing → Thinking (app) → Speaking
+                eng.set_status_callback(
+                    lambda msg: self.after(0, self._set_voice_status, msg)
+                )
+                self.voice = eng
+                logging.info("Voice engine ready")
+                # Prefer the live "Hold F9…" hint once mic is up
+                self._set_voice_status("Hold F9 to ask a question")
+            else:
+                self.voice = None
+                logging.warning("Voice engine unavailable: %s", eng._init_error)
+        except Exception:
+            logging.exception("Voice engine failed to start — voice features disabled")
+            self.voice = None
 
     def _resolve_theme_fonts(self):
         self.theme["font"] = _best_available_font(
@@ -997,10 +1469,12 @@ class App(tk.Tk):
 
         self.tab_dash = tk.Frame(self.body, bg=t["bg"])
         self.tab_codes = tk.Frame(self.body, bg=t["bg"])
+        self.tab_ai = tk.Frame(self.body, bg=t["bg"])
         self.tab_settings = tk.Frame(self.body, bg=t["bg"])
 
         self._build_dash()
         self._build_codes()
+        self._build_ai()
         self._build_settings()
         self._show_tab(getattr(self, "_active_tab", "dash") or "dash")
         self._footer()
@@ -1029,26 +1503,34 @@ class App(tk.Tk):
                selectforeground=[("readonly", sel_fg)])
 
     def _set_app_icon(self):
-        """Window + taskbar icon from 4G1 badge artwork."""
-        try:
-            if os.path.isfile(ICON_PATH):
-                self.iconbitmap(ICON_PATH)
-        except Exception:
-            pass
-        # iconphoto gives a sharper taskbar/title icon on modern Tk (PNG)
-        for path in (MARK_PATH, LOGO_PATH, SOURCE_LOGO_PATH):
+        """Window + taskbar icon from 4G1 badge artwork.
+
+        Prefer a small PNG via iconphoto — large masters / PNG-in-ICO can
+        misbehave on some Tk builds. iconbitmap is best-effort only.
+        """
+        # iconphoto first with a small safe image
+        for path in (MARK_PATH, LOGO_PATH):
             if not os.path.isfile(path):
                 continue
             try:
                 img = tk.PhotoImage(file=path)
-                if img.height() > 64:
-                    factor = max(1, img.height() // 64)
-                    img = img.subsample(factor, factor)
+                # Tk PhotoImage can get unhappy with very large images on 32-bit
+                while img.height() > 64 and img.width() > 64:
+                    img = img.subsample(2, 2)
                 self._app_icon = img
                 self.iconphoto(True, self._app_icon)
                 break
             except Exception:
-                continue
+                logging.exception("iconphoto failed for %s", path)
+        try:
+            if os.path.isfile(ICON_PATH):
+                self.iconbitmap(default=ICON_PATH)
+        except Exception:
+            try:
+                if os.path.isfile(ICON_PATH):
+                    self.iconbitmap(ICON_PATH)
+            except Exception:
+                logging.info("iconbitmap unavailable for %s", ICON_PATH)
 
     def _set_titlebar_colour(self):
         """Tint the native Windows title bar to match the active theme (Win11 20H1+).
@@ -1069,7 +1551,9 @@ class App(tk.Tk):
             raw = self.winfo_id()
             hwnd = ctypes.windll.user32.GetAncestor(raw, GA_ROOT) or raw
             caption = ctypes.c_int(colorref(t.get("title", t["panel"])))
-            text = ctypes.c_int(colorref(t.get("fg", "#ffffff")))
+            # XP caption is navy blue — force white title text for readability
+            text_hex = "#FFFFFF" if t.get("xp") else t.get("fg", "#ffffff")
+            text = ctypes.c_int(colorref(text_hex))
             DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR = 35, 36
             for attr, val in ((DWMWA_CAPTION_COLOR, caption), (DWMWA_TEXT_COLOR, text)):
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -1185,8 +1669,10 @@ class App(tk.Tk):
                  font=ui_font(t, 17, bold=True)).pack(side="left")
         tk.Label(row, text="LIVE", bg=bar, fg=live_fg,
                  font=ui_font(t, 17, bold=True)).pack(side="left", padx=(4, 0))
+        tk.Label(row, text=" AI", bg=bar, fg=("#7EC8FF" if xp else t.get("brand2", t["accent"])),
+                 font=ui_font(t, 17, bold=True)).pack(side="left")
         self.vehicle_lbl = tk.Label(
-            title, text="MITSUBISHI LIVE ECU DATA", bg=bar, fg=dim,
+            title, text="MITSUBISHI LIVE ECU DATA  ·  AI EDITION", bg=bar, fg=dim,
             font=ui_font(t, 7),
         )
         self.vehicle_lbl.pack(anchor="w")
@@ -1223,26 +1709,25 @@ class App(tk.Tk):
                                  font=ui_font(t, 8, mono=True))
         self.dev_info.pack(anchor="w", pady=(3, 0))
 
-        actions = tk.Frame(inner, bg=bar)
-        actions.pack(side="right")
-        self.connect_btn = SoftButton(actions, "Connect", self.on_connect, ht, primary=False)
-        self.connect_btn.pack(side="left")
-        action_theme = dict(ht)
-        action_theme["accent"] = t["warn"]
-        action_theme["accent_hi"] = "#FF9A3C"
-        self.live_btn = SoftButton(actions, "▶  Start Live Data", self.toggle_live,
-                                   action_theme, primary=True)
-        self.live_btn.config(state="disabled")
-        self.live_btn.pack(side="left", padx=(10, 0))
+        if not xp:
+            actions = tk.Frame(inner, bg=bar)
+            actions.pack(side="right")
+            self.connect_btn = SoftButton(actions, "Connect", self.on_connect, ht, primary=False)
+            self.connect_btn.pack(side="left")
+            action_theme = dict(ht)
+            action_theme["accent"] = t["warn"]
+            action_theme["accent_hi"] = "#FF9A3C"
+            self.live_btn = SoftButton(actions, "▶  Start Live Data", self.toggle_live,
+                                       action_theme, primary=True)
+            self.live_btn.config(state="disabled")
+            self.live_btn.pack(side="left", padx=(10, 0))
+            SoftButton(actions, "Analyse Log", self.analyse_tactrix_log, ht,
+                       primary=False).pack(side="left", padx=(10, 0))
 
-        self.demo_btn = SoftButton(actions, "Explore Demo", self.toggle_demo, ht,
-                                   primary=False)
-        self.demo_btn.pack(side="left", padx=(10, 0))
-
-        about = tk.Label(actions, text=f"About  ·  v{VERSION}", bg=bar, fg=muted,
-                         font=ui_font(t, 8), cursor="hand2")
-        about.pack(side="left", padx=(14, 0))
-        about.bind("<Button-1>", lambda _e: self._show_about())
+            about = tk.Label(actions, text=f"About  ·  v{VERSION}", bg=bar, fg=muted,
+                             font=ui_font(t, 8), cursor="hand2")
+            about.pack(side="left", padx=(14, 0))
+            about.bind("<Button-1>", lambda _e: self._show_about())
 
         self.clock_lbl = tk.Label(inner, text="", bg=bar, fg=muted,
                                   font=ui_font(t, 8, mono=True))
@@ -1251,67 +1736,134 @@ class App(tk.Tk):
             tk.Frame(self, bg=t["border"], height=1).pack(fill="x")
 
     def _toolbar(self):
-        # Connection actions now live in the compact product header.
-        pass
+        """Grey Luna toolbar — Connect / Live Data stay readable (black on beige)."""
+        t = self.theme
+        if not t.get("xp"):
+            return
+        bar = tk.Frame(self, bg=t.get("elev", "#EFEFEF"), height=40)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        inner = tk.Frame(bar, bg=t.get("elev", "#EFEFEF"))
+        inner.pack(side="left", padx=8, pady=5)
+        self.connect_btn = SoftButton(inner, "Connect", self.on_connect, t, primary=False)
+        self.connect_btn.pack(side="left")
+        live_theme = dict(t)
+        live_theme["button_face"] = "#FFE45A"
+        live_theme["button_hi"] = "#FFF3A0"
+        self.live_btn = SoftButton(
+            inner, "Start Live Data", self.toggle_live, live_theme, primary=False,
+        )
+        self.live_btn.config(state="disabled")
+        self.live_btn.pack(side="left", padx=(8, 0))
+        SoftButton(inner, "Analyse Log", self.analyse_tactrix_log, t, primary=False).pack(
+            side="left", padx=(8, 0),
+        )
+        about = tk.Label(
+            inner, text=f"About  ·  v{VERSION}", bg=t.get("elev", "#EFEFEF"),
+            fg=t["dim"], font=ui_font(t, 8), cursor="hand2",
+        )
+        about.pack(side="left", padx=(14, 0))
+        about.bind("<Button-1>", lambda _e: self._show_about())
+        hint = tk.Label(
+            bar, text="Connect adapter  →  Start Live Data",
+            bg=t.get("elev", "#EFEFEF"), fg=t["dim"], font=ui_font(t, 8),
+        )
+        hint.pack(side="right", padx=12)
 
     def _tabbar(self):
         t = self.theme
-        bar = tk.Frame(self, bg=t["panel"], height=42)
+        xp = bool(t.get("xp"))
+        bar_bg = t.get("tab_bar", t["panel"]) if xp else t["panel"]
+        bar = tk.Frame(self, bg=bar_bg, height=36 if xp else 42)
         bar.pack(fill="x")
         bar.pack_propagate(False)
         self._tab_btns = {}
-        for key, label in (("dash", "Dashboard"), ("codes", "Codes"), ("settings", "Settings")):
-            b = tk.Label(bar, text=f"    {label}    ", bg=t["panel"], fg=t["dim"],
-                         font=ui_font(t, 9, bold=True), pady=11, cursor="hand2")
-            b.pack(side="left", padx=(8 if key == "dash" else 0, 2))
+        for key, label in (("dash", "Dashboard"), ("codes", "Codes"),
+                           ("ai", "AI Assistant"), ("settings", "Settings")):
+            if xp:
+                # Classic Luna tabs: raised bevel, selected sits on white face
+                b = tk.Label(
+                    bar, text=f"  {label}  ", bg=t["elev"], fg=t["fg"],
+                    font=ui_font(t, 9, bold=True), pady=6, padx=10, cursor="hand2",
+                    relief="raised", bd=2,
+                )
+                b.pack(side="left", padx=(6 if key == "dash" else 1, 0), pady=(6, 0))
+            else:
+                b = tk.Label(bar, text=f"    {label}    ", bg=t["panel"], fg=t["dim"],
+                             font=ui_font(t, 9, bold=True), pady=11, cursor="hand2")
+                b.pack(side="left", padx=(8 if key == "dash" else 0, 2))
             b.bind("<Button-1>", lambda e, k=key: self._show_tab(k))
             self._tab_btns[key] = b
-        self._tab_underline = tk.Frame(self, bg=t["panel"], height=2)
-        self._tab_underline.pack(fill="x")
-        self._tab_line = tk.Frame(self._tab_underline, bg=t["accent"], height=2, width=100)
-        # placeholder; position updated on show
-        tk.Frame(self, bg=t["border"], height=1).pack(fill="x")
+        if xp:
+            # no modern underline — selected tab face joins the content area
+            self._tab_underline = tk.Frame(self, bg=t["panel"], height=0)
+            self._tab_line = tk.Frame(self, bg=t["panel"], height=0, width=0)
+            tk.Frame(self, bg=t.get("button_shadow", "#808080"), height=1).pack(fill="x")
+        else:
+            self._tab_underline = tk.Frame(self, bg=t["panel"], height=2)
+            self._tab_underline.pack(fill="x")
+            self._tab_line = tk.Frame(self._tab_underline, bg=t["accent"], height=2, width=100)
+            tk.Frame(self, bg=t["border"], height=1).pack(fill="x")
 
     def _show_tab(self, key):
         self._active_tab = key
         t = self.theme
+        xp = bool(t.get("xp"))
         for k, fr in (("dash", self.tab_dash), ("codes", self.tab_codes),
-                      ("settings", self.tab_settings)):
+                      ("ai", self.tab_ai), ("settings", self.tab_settings)):
             fr.pack_forget()
-        {"dash": self.tab_dash, "codes": self.tab_codes,
+        {"dash": self.tab_dash, "codes": self.tab_codes, "ai": self.tab_ai,
          "settings": self.tab_settings}[key].pack(fill="both", expand=True)
 
         for k, b in self._tab_btns.items():
-            if k == key:
-                b.config(fg=t["accent"], bg=t.get("tab_sel", t["panel2"]))
+            if xp:
+                if k == key:
+                    b.config(
+                        fg=t["fg"], bg=t.get("tab_sel", t["panel2"]),
+                        relief="raised", bd=2,
+                    )
+                else:
+                    b.config(
+                        fg=t.get("muted", t["dim"]), bg=t.get("elev", t["panel"]),
+                        relief="raised", bd=1,
+                    )
             else:
-                b.config(fg=t["dim"], bg=t["panel"])
-        # accent underline under active tab
-        self._tab_line.place_forget()
-        try:
-            b = self._tab_btns[key]
-            self.update_idletasks()
-            x = b.winfo_x()
-            w = b.winfo_width()
-            self._tab_line.configure(width=max(w, 40), bg=t["accent"])
-            self._tab_line.place(x=x, y=0, height=2)
-        except Exception:
-            pass
+                if k == key:
+                    b.config(fg=t["accent"], bg=t.get("tab_sel", t["panel2"]))
+                else:
+                    b.config(fg=t["dim"], bg=t["panel"])
+        # accent underline under active tab (modern themes only)
+        if not xp and getattr(self, "_tab_line", None) is not None:
+            self._tab_line.place_forget()
+            try:
+                b = self._tab_btns[key]
+                self.update_idletasks()
+                x = b.winfo_x()
+                w = b.winfo_width()
+                self._tab_line.configure(width=max(w, 40), bg=t["accent"])
+                self._tab_line.place(x=x, y=0, height=2)
+            except Exception:
+                pass
         if key == "dash":
             self._fit_tries = 0
             self.after(120, self._autofit_dash)
 
     def _footer(self):
         t = self.theme
-        foot = tk.Frame(self, bg=t["panel"])
+        foot_bg = t.get("elev", t["panel"]) if t.get("xp") else t["panel"]
+        foot = tk.Frame(self, bg=foot_bg)
         foot.pack(fill="x", side="bottom")
-        tk.Frame(foot, bg=t["border"], height=1).pack(fill="x")
-        inner = tk.Frame(foot, bg=t["panel"])
+        if t.get("xp"):
+            tk.Frame(foot, bg=t.get("button_hi", "#FFFFFF"), height=1).pack(fill="x")
+            tk.Frame(foot, bg=t.get("button_shadow", "#808080"), height=1).pack(fill="x")
+        else:
+            tk.Frame(foot, bg=t["border"], height=1).pack(fill="x")
+        inner = tk.Frame(foot, bg=foot_bg)
         inner.pack(fill="x", padx=10, pady=4)
         self.foot_left = tk.Label(inner, text=self._conn_summary(),
-                                  bg=t["panel"], fg=t["muted"], font=ui_font(t, 7))
+                                  bg=foot_bg, fg=t["muted"], font=ui_font(t, 7))
         self.foot_left.pack(side="left")
-        self.foot_right = tk.Label(inner, text="Ready", bg=t["panel"], fg=t["muted"],
+        self.foot_right = tk.Label(inner, text="Ready", bg=foot_bg, fg=t["muted"],
                                    font=ui_font(t, 7, mono=True))
         self.foot_right.pack(side="right")
 
@@ -1360,7 +1912,6 @@ class App(tk.Tk):
             PRODUCT_DESCRIPTION, "",
             COPYRIGHT, "",
             "Runs locally. Vehicle data is not uploaded or shared.",
-            "Demo mode does not connect to a vehicle.", "",
             "For diagnostic assistance only. Confirm readings and repairs",
             "against the applicable factory service information.",
         ):
@@ -1402,18 +1953,43 @@ class App(tk.Tk):
                  font=ui_font(t, 11)).pack(side="left")
         tk.Label(ib, text="No live data yet  —  ", bg=t["elev"], fg=t["fg"],
                  font=ui_font(t, 9, bold=True)).pack(side="left")
-        tk.Label(ib, text="press Connect to read your adapter, or try Explore Demo "
-                 "to see 4G1 Live in action.", bg=t["elev"], fg=t["dim"],
-                 font=ui_font(t, 9)).pack(side="left")
+        tk.Label(ib, text="connect an adapter with the ignition in RUN to begin live diagnostics.",
+                 bg=t["elev"], fg=t["dim"], font=ui_font(t, 9)).pack(side="left")
+
+        # Persistent, glanceable AI alert strip — meant to be readable from
+        # across the truck on a big screen mid-race, not tucked in a tab.
+        self.ai_banner = tk.Frame(self.tab_dash, bg=t["elev"],
+                                  highlightbackground=t.get("accent2", t["accent"]),
+                                  highlightthickness=1)
+        self.ai_banner.pack(fill="x", pady=(0, 6))
+        self._ai_banner_rows = []
+        for _ in range(3):
+            row = tk.Label(self.ai_banner, text="", bg=t["elev"], fg=t["fg"],
+                           font=ui_font(t, 11, bold=True), anchor="w",
+                           justify="left", wraplength=1000)
+            row.pack(fill="x", padx=14, pady=(4, 4))
+            self._ai_banner_rows.append(row)
+        self._render_ai_banner()
+
+        # Push-to-talk hint / live status — hold F9 anywhere in the app to ask
+        # a question by voice; see _on_ptt_press/_on_ptt_release in app.py.
+        voice_hint = "Hold F9 to ask a question" if self.voice is not None else \
+            "Voice unavailable on this machine"
+        self.voice_status_lbl = tk.Label(
+            self.tab_dash, text=voice_hint, bg=t["bg"], fg=t["muted"],
+            font=ui_font(t, 9), anchor="w",
+        )
+        self.voice_status_lbl.pack(fill="x", pady=(0, 4))
 
         # Bottom-anchored sections pack FIRST so they always keep their
         # space — shortfall pinches the middle, which _autofit_dash repairs.
-        logwrap_outer, logwrap = card(self.tab_dash, t)
+        logwrap_outer, logwrap = card(self.tab_dash, t, title="Telemetry Log")
         logwrap_outer.pack(side="bottom", fill="both", expand=True, pady=(0, 4))
         bar = tk.Frame(logwrap, bg=t["panel"])
         bar.pack(fill="x")
-        tk.Label(bar, text="TELEMETRY LOG", bg=t["panel"], fg=t["dim"],
-                 font=ui_font(t, 8, bold=True)).pack(side="left", padx=12, pady=7)
+        if not t.get("xp"):
+            tk.Label(bar, text="TELEMETRY LOG", bg=t["panel"], fg=t["dim"],
+                     font=ui_font(t, 8, bold=True)).pack(side="left", padx=12, pady=7)
         save = tk.Label(bar, text="  Save CSV  ", bg=t["panel2"], fg=t["fg"],
                         font=ui_font(t, 8, bold=True), cursor="hand2", pady=4)
         save.pack(side="right", padx=8, pady=4)
@@ -1435,10 +2011,11 @@ class App(tk.Tk):
         self.chart_load = StripChart(lower, t, "Engine Load", "%",
                                      _param(0x1C)[3], accent=t["good"])
         self.chart_load.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        health_outer, health = card(lower, t, accent=t.get("good"))
+        health_outer, health = card(lower, t, accent=t.get("good"), title="Session Health")
         health_outer.pack(side="left", fill="both", expand=True)
-        tk.Label(health, text="SESSION HEALTH", bg=t["panel"], fg=t["dim"],
-                 font=ui_font(t, 8, bold=True)).pack(anchor="w", padx=14, pady=(7, 5))
+        if not t.get("xp"):
+            tk.Label(health, text="SESSION HEALTH", bg=t["panel"], fg=t["dim"],
+                     font=ui_font(t, 8, bold=True)).pack(anchor="w", padx=14, pady=(7, 5))
         metrics = tk.Frame(health, bg=t["panel"])
         metrics.pack(fill="both", expand=True, padx=14, pady=(0, 8))
         self.hz_lbl = tk.Label(metrics, text="— Hz", bg=t["panel"], fg=t["muted"],
@@ -1456,20 +2033,19 @@ class App(tk.Tk):
         primary.pack_propagate(False)
         self._dash_primary = primary
 
-        rpm_outer, rpm_panel = card(primary, t)
+        rpm_outer, rpm_panel = card(primary, t, title="Engine RPM")
         rpm_outer.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        rpm_head = tk.Frame(rpm_panel, bg=t["panel"])
-        rpm_head.pack(fill="x", padx=12, pady=(6, 3))
-        tk.Label(rpm_head, text="RPM", bg=t["panel"], fg=t["fg"],
-                 font=ui_font(t, 9, bold=True)).pack(side="left")
-        tk.Label(rpm_head, text="ENGINE SPEED  ·  rpm", bg=t["panel"], fg=t["muted"],
-                 font=ui_font(t, 7)).pack(side="right")
+        if not t.get("xp"):
+            rpm_head = tk.Frame(rpm_panel, bg=t["panel"])
+            rpm_head.pack(fill="x", padx=12, pady=(6, 3))
+            tk.Label(rpm_head, text="RPM", bg=t["panel"], fg=t["fg"],
+                     font=ui_font(t, 9, bold=True)).pack(side="left")
+            tk.Label(rpm_head, text="ENGINE SPEED  ·  rpm", bg=t["panel"], fg=t["muted"],
+                     font=ui_font(t, 7)).pack(side="right")
         rpm_body = tk.Frame(rpm_panel, bg=t["panel"])
-        rpm_body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        rpm_tile = HeroTile(rpm_body, 0x21, t, width=self._scaled_px(150))
-        rpm_tile.pack(side="left", fill="y", padx=(0, 6))
-        rpm_tile.pack_propagate(False)
-        rpm_tile.configure(width=self._scaled_px(150))
+        rpm_body.pack(fill="both", expand=True, padx=8, pady=(6, 8))
+        rpm_tile = HeroTile(rpm_body, 0x21, t, caption=False)
+        rpm_tile.pack(side="left", fill="both", expand=True, padx=(0, 6))
         self.heroes[0x21] = rpm_tile
         self.chart_rpm = StripChart(rpm_body, t, "RPM trend", "rpm",
                                     _param(0x21)[3], accent=t["accent"])
@@ -1480,7 +2056,7 @@ class App(tk.Tk):
         for i, pid in enumerate([0x06, 0x07, 0x3A, 0x17, 0x14, 0x2F]):
             if pid not in j2534.ALL_PARAMS:
                 continue
-            tile = HeroTile(critical, pid, t, width=self._scaled_px(160), height=self._scaled_px(96))
+            tile = HeroTile(critical, pid, t, width=self._scaled_px(160), height=self._scaled_px(110))
             tile.grid(row=i // 3, column=i % 3, padx=3, pady=3, sticky="nsew")
             tile.grid_propagate(False)
             self.heroes[pid] = tile
@@ -1506,9 +2082,11 @@ class App(tk.Tk):
         if self.live:
             banner.pack_forget()
         else:
-            primary = getattr(self, "_dash_primary", None)
-            if primary is not None and primary.winfo_exists():
-                banner.pack(fill="x", pady=(8, 4), before=primary)
+            # Above the AI banner too — connecting an adapter is the next step
+            # thing that matters before any data exists at all.
+            before_widget = getattr(self, "ai_banner", None) or getattr(self, "_dash_primary", None)
+            if before_widget is not None and before_widget.winfo_exists():
+                banner.pack(fill="x", pady=(8, 4), before=before_widget)
             else:
                 banner.pack(fill="x", pady=(8, 4))
 
@@ -1566,10 +2144,13 @@ class App(tk.Tk):
         self.codes_box.insert("end", "Connect to the ECU, then press Read Codes.\n\n")
         self.codes_box.insert(
             "end",
-            "Note: fault-code support varies by ECU. Codes are read from\n"
-            "requests 0x38/0x39, which on some MUT-II ECUs carry live data\n"
-            "instead. Treat an empty result as inconclusive, not as proof\n"
-            "the vehicle is fault-free.\n\n")
+            "Codes are read from the ECU's fault registers: 0x36 active\n"
+            "fault count, with 0x47/0x48 as the active fault bitmask.\n"
+            "(Corrected 18/8/26 — this previously read 0x38/0x39, which are\n"
+            "pressure channels, not fault registers.)\n\n"
+            "The COUNT is reliable. The bit-to-code mapping is not yet\n"
+            "verified on this ECU, so individual code names are provisional\n"
+            "until confirmed against a deliberately induced fault.\n\n")
         self.codes_box.insert("end", "Examples:\n")
         self.codes_box.insert("end", "  #11  Oxygen sensor\n")
         self.codes_box.insert("end", "  #21  Engine coolant temperature sensor\n")
@@ -1593,6 +2174,672 @@ class App(tk.Tk):
                      anchor="w").pack(side="left")
             tk.Label(row, text=desc, bg=t["panel"], fg=t["dim"],
                      font=ui_font(t, 8), anchor="w").pack(side="left")
+
+    # ---------- AI assistant (personal edition) ----------
+    def _build_ai(self):
+        t = self.theme
+        wrap = tk.Frame(self.tab_ai, bg=t["bg"])
+        wrap.pack(fill="both", expand=True, pady=10)
+
+        outer, panel = card(wrap, t, accent=t.get("accent2"))
+        outer.pack(fill="both", expand=True)
+
+        head = tk.Frame(panel, bg=t["panel"])
+        head.pack(fill="x", padx=18, pady=(14, 4))
+        tk.Label(head, text="AI Assistant", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 15, bold=True)).pack(anchor="w")
+        tk.Label(
+            head,
+            text="Grok-powered pit mate. Remembers you and this car across restarts, "
+                 "learns sensor normals from session CSVs, searches uploaded manuals "
+                 "(xAI Collections), and explains warn/bad or baseline drift. "
+                 "Type below or hold F9. Grok login or XAI_API_KEY.",
+            bg=t["panel"], fg=t["muted"], font=ui_font(t, 8), wraplength=760, justify="left",
+        ).pack(anchor="w", pady=(2, 4))
+        tk.Label(
+            head,
+            text=ai_memory.memory_stats(self._memory),
+            bg=t["panel"], fg=t["dim"], font=ui_font(t, 8),
+        ).pack(anchor="w", pady=(0, 2))
+        self.ai_knowledge_lbl = tk.Label(
+            head,
+            text=ai_knowledge.stats(self._knowledge),
+            bg=t["panel"], fg=t["dim"], font=ui_font(t, 8),
+        )
+        self.ai_knowledge_lbl.pack(anchor="w", pady=(0, 6))
+
+        # Show the learned baseline right away — it's built from real logged
+        # sessions at startup, so there's something real to see here even
+        # before this run has captured a single live sample.
+        baseline_frame = tk.Frame(panel, bg=t["panel"])
+        baseline_frame.pack(fill="x", padx=18, pady=(0, 10))
+        tk.Label(
+            baseline_frame,
+            text=f"LEARNED BASELINE  ·  {len(self._baseline)} parameters from your logged sessions",
+            bg=t["panel"], fg=t["dim"], font=ui_font(t, 8, bold=True),
+        ).pack(anchor="w")
+        if self._baseline:
+            name_to_units = {meta[0]: meta[2] for meta in j2534.ALL_PARAMS.values()}
+            grid = tk.Frame(baseline_frame, bg=t["panel"])
+            grid.pack(fill="x", pady=(4, 0))
+            for i, (name, buckets) in enumerate(sorted(self._baseline.items())):
+                units = name_to_units.get(name, "")
+                parts = [
+                    f"{bucket} {stats['mean']:.1f}±{stats['stdev']:.1f}"
+                    for bucket, stats in buckets.items()
+                ]
+                cell = tk.Frame(grid, bg=t["panel"])
+                cell.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 20), pady=1)
+                tk.Label(cell, text=f"{name} ({units})", bg=t["panel"], fg=t["fg"],
+                         font=ui_font(t, 8, bold=True)).pack(side="left")
+                tk.Label(cell, text=f"  {'  ·  '.join(parts) or '—'}", bg=t["panel"], fg=t["muted"],
+                         font=ui_font(t, 8)).pack(side="left")
+        else:
+            tk.Label(
+                baseline_frame,
+                text="No history yet — log a few sessions, then Rebuild Baseline in Settings.",
+                bg=t["panel"], fg=t["muted"], font=ui_font(t, 8),
+            ).pack(anchor="w", pady=(2, 0))
+
+        log_relief = "sunken" if t.get("xp") else "flat"
+        log_bd = 2 if t.get("xp") else 0
+        self.ai_log = tk.Text(
+            panel, bg=t["chart"], fg=t["fg"], relief=log_relief, bd=log_bd,
+            font=ui_font(t, 10, mono=True), height=12, insertbackground=t["fg"],
+            selectbackground=t.get("accent", t["panel2"]) if t.get("xp") else t["panel2"],
+            selectforeground="#FFFFFF" if t.get("xp") else t["fg"],
+            padx=16, pady=14, wrap="word",
+        )
+        self.ai_log.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+        who = (self._memory.get("user_name") or ai_memory.DEFAULT_USER_NAME)
+        n_docs = len(self._knowledge.get("documents") or [])
+        manuals_bit = (
+            f"{n_docs} manual(s) linked — ask for factory specs anytime."
+            if n_docs else
+            "No manuals yet — use Upload Manual below or Settings."
+        )
+        self.ai_log.insert(
+            "end",
+            f"Hey {who} — 4G1 AI is awake. Baseline + memory loaded. {manuals_bit}\n"
+            f"Type a question below, or hold F9 to speak.\n",
+        )
+
+        # Typed chat input
+        chat_row = tk.Frame(panel, bg=t["panel"])
+        chat_row.pack(fill="x", padx=18, pady=(0, 8))
+        self.ai_chat_var = tk.StringVar()
+        entry_kw = dict(
+            textvariable=self.ai_chat_var,
+            bg=t["panel2"] if t.get("xp") else t["elev"],
+            fg=t["fg"], insertbackground=t["fg"],
+            font=ui_font(t, 10),
+        )
+        if t.get("xp"):
+            entry_kw.update(relief="sunken", bd=2)
+        else:
+            entry_kw.update(relief="flat")
+        self.ai_chat_entry = tk.Entry(chat_row, **entry_kw)
+        self.ai_chat_entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 8))
+        self.ai_chat_entry.bind("<Return>", lambda _e: self._on_chat_send())
+        SoftButton(chat_row, "Send", self._on_chat_send, t, primary=True).pack(side="left")
+
+        tools_row = tk.Frame(panel, bg=t["panel"])
+        tools_row.pack(fill="x", padx=18, pady=(0, 14))
+        SoftButton(tools_row, "Upload Manual…", self._upload_manual, t, primary=False).pack(
+            side="left", padx=(0, 8),
+        )
+        SoftButton(tools_row, "Analyse Tactrix Log…", self.analyse_tactrix_log, t,
+                   primary=False).pack(side="left", padx=(0, 8))
+        SoftButton(tools_row, "Save Memory Now", self._force_consolidate_memory, t,
+                   primary=False).pack(side="left")
+        SoftButton(tools_row, "Get PDF Management Key", self._open_mgmt_console, t,
+                   primary=False).pack(side="left", padx=(8, 0))
+        mgmt_ok = bool((os.environ.get("XAI_MANAGEMENT_API_KEY") or "").strip())
+        tk.Label(
+            tools_row,
+            text=("  PDF key OK — cloud + local ingest")
+            if mgmt_ok else
+            "  PDF management key REQUIRED for cloud search — Get key, paste in Settings",
+            bg=t["panel"], fg=(t["good"] if mgmt_ok else t["bad"]),
+            font=ui_font(t, 8, bold=True),
+        ).pack(side="left")
+
+    def _render_ai_banner(self):
+        rows = getattr(self, "_ai_banner_rows", None)
+        if not rows:
+            return
+        t = self.theme
+        alerts = list(reversed(self._ai_alerts[-len(rows):]))
+        if not alerts:
+            rows[0].config(text="AI Assistant — watching sensor health, nothing to report yet.",
+                           fg=t["muted"])
+            rows[0].pack(fill="x", padx=14, pady=(4, 4))
+            for row in rows[1:]:
+                row.pack_forget()
+            return
+        for row, alert in zip(rows, alerts):
+            if alert["verdict"] == "bad":
+                colour = t["bad"]
+            elif alert["verdict"] == "warn":
+                colour = t.get("warn", t["accent"])
+            else:
+                colour = t.get("accent2", t["accent"])
+            row.config(text=f"⚠ {alert['name']}: {alert['text']}", fg=colour)
+            row.pack(fill="x", padx=14, pady=(4, 4))
+        for row in rows[len(alerts):]:
+            row.pack_forget()
+
+    def _add_ai_alert(self, reading, text):
+        self._ai_alerts.append({"name": reading.name, "verdict": reading.verdict, "text": text})
+        self._ai_alerts = self._ai_alerts[-20:]
+        self._render_ai_banner()
+        log = getattr(self, "ai_log", None)
+        if log is not None:
+            stamp = time.strftime("%H:%M:%S")
+            log.insert("end", f"[{stamp}] {reading.name} ({reading.verdict}): {text}\n\n")
+            log.see("end")
+        try:
+            ai_memory.record_alert(self._memory, reading.name, reading.verdict, text)
+            self._session_turns.append({
+                "role": "assistant",
+                "content": f"[alert {reading.name}/{reading.verdict}] {text}",
+            })
+            self._memory_dirty = True
+            ai_memory.save_memory(self._memory, MEMORY_PATH)
+        except Exception:
+            logging.exception("Failed to record AI alert into memory")
+        if self.voice is not None and self.settings.get("voice_enabled", True):
+            self.voice.speak(text)
+
+    def _memory_brief(self):
+        prof = j2534.get_profile(self.settings.get("vehicle_profile"))
+        base = ai_memory.format_for_prompt(
+            self._memory,
+            vehicle_profile_id=self.settings.get("vehicle_profile"),
+            vehicle_label=prof.get("name"),
+        )
+        manuals = ai_knowledge.format_for_prompt(self._knowledge)
+        brief = base + "\n\n" + manuals
+        last = getattr(self, "_last_log_report", None)
+        if last:
+            brief += "\n\nMost recently analysed Tactrix/4G1 log (use if they ask about the log):\n"
+            brief += last[:3500]
+        return brief
+
+    def _collection_ids(self):
+        return ai_knowledge.collection_ids(self._knowledge)
+
+    _EXPLAIN_COOLDOWN_S = 60.0
+
+    def _maybe_explain_transitions(self, ctx):
+        """State-change trigger: only fires on a NEW warn/bad verdict or a
+        freshly-crossed baseline deviation — never on every poll tick.
+        """
+        if not self.settings.get("ai_enabled", True):
+            return
+        state = j2534.engine_state(ctx)
+        for pid in j2534.HEALTH_PIDS:
+            if pid not in ctx:
+                continue
+            value = ctx[pid]
+            verdict = j2534.sensor_health(pid, value, ctx=ctx)
+            name = _param(pid)[0]
+            z = baseline.deviation(self._baseline, name, value, state)
+            is_dev = z is not None and abs(z) >= 3.0
+            prev_verdict = self._last_verdict.get(pid)
+            prev_dev = self._last_dev.get(pid, False)
+            trigger = (verdict in ("warn", "bad") and verdict != prev_verdict) or (
+                is_dev and not prev_dev)
+            self._last_verdict[pid] = verdict
+            self._last_dev[pid] = is_dev
+            if trigger:
+                self._request_explanation(pid, name, value, verdict or "deviation", z, ctx)
+
+    def _request_explanation(self, pid, name, value, verdict, z, ctx):
+        now = time.monotonic()
+        if self._explain_busy or now - self._explain_cooldown.get(pid, 0.0) < self._EXPLAIN_COOLDOWN_S:
+            return
+        self._explain_cooldown[pid] = now
+        self._explain_busy = True
+        ctx_readings = {}
+        for other_pid, other_val in ctx.items():
+            if other_pid == pid or other_pid not in j2534.HEALTH_PIDS:
+                continue
+            ctx_readings[_param(other_pid)[0]] = other_val
+        prof = j2534.get_profile(self.settings.get("vehicle_profile"))
+        reading = ai_assistant.Reading(
+            name=name, value=value, units=_param(pid)[2], verdict=verdict,
+            note=j2534.PARAM_NOTES.get(pid, ""),
+            criteria=j2534.HEALTH_CRITERIA.get(pid, ""),
+            baseline_z=z, ctx_readings=ctx_readings, vehicle_profile=prof["name"],
+            engine_state=j2534.engine_state(ctx),
+        )
+        model = self.settings.get("ai_model", ai_assistant.DEFAULT_MODEL)
+        brief = self._memory_brief()
+        threading.Thread(
+            target=self._explain_worker, args=(reading, model, brief), daemon=True,
+        ).start()
+
+    def _explain_worker(self, reading, model, memory_brief):
+        text = None
+        try:
+            text = ai_assistant.explain(reading, model=model, memory_brief=memory_brief)
+        except Exception:
+            logging.exception("AI explanation request failed")
+        self.after(0, self._explain_done, reading, text)
+
+    def _explain_done(self, reading, text):
+        self._explain_busy = False
+        if not text:
+            text = (
+                f"{reading.note or reading.criteria or 'Outside its normal band.'} "
+                f"(AI explanation unavailable — check connectivity / XAI_API_KEY.)"
+            )
+        self._add_ai_alert(reading, text)
+
+    _TREND_INTERVAL_MS = 180000  # 3 minutes — a trend, not an instant spike
+    _TREND_MIN_SAMPLES = 30
+    _TREND_Z_THRESHOLD = 2.5
+    _TREND_RECHECK_S = 600.0  # don't re-flag the same parameter inside 10 min
+
+    def _check_trend_reminders(self):
+        try:
+            if (self.live and self.settings.get("ai_enabled", True)
+                    and len(self.samples) >= self._TREND_MIN_SAMPLES):
+                recent = self.samples[-self._TREND_MIN_SAMPLES:]
+                ctx = dict(self.latest)
+                state = j2534.engine_state(ctx)
+                for pid in j2534.HEALTH_PIDS:
+                    name = _param(pid)[0]
+                    vals = [s[name] for s in recent if s.get(name) is not None]
+                    if len(vals) < self._TREND_MIN_SAMPLES // 2:
+                        continue
+                    avg = sum(vals) / len(vals)
+                    z = baseline.deviation(self._baseline, name, avg, state)
+                    if z is None or abs(z) < self._TREND_Z_THRESHOLD:
+                        continue
+                    now = time.monotonic()
+                    if now - self._trend_flagged.get(name, 0.0) < self._TREND_RECHECK_S:
+                        continue
+                    self._trend_flagged[name] = now
+                    self._request_explanation(pid, name, avg, "trend", z, ctx)
+        finally:
+            self.after(self._TREND_INTERVAL_MS, self._check_trend_reminders)
+
+    def _rebuild_baseline(self):
+        try:
+            self._baseline = baseline.build_baseline(SESSION_DIR)
+            baseline.save_baseline(self._baseline, BASELINE_PATH)
+            log = getattr(self, "log_line", None)
+            if log is not None:
+                log(f"Baseline rebuilt from {SESSION_DIR}")
+        except Exception:
+            logging.exception("Baseline rebuild failed")
+
+    def _rebuild_baseline_and_refresh(self):
+        """Settings-tab 'Rebuild Baseline' button: rebuild, then reflect the
+        new parameter count in the label right away."""
+        self._rebuild_baseline()
+        lbl = getattr(self, "ai_baseline_lbl", None)
+        if lbl is not None:
+            lbl.config(text=f"Learned baseline: {len(self._baseline)} parameters from logged sessions")
+
+    def _test_ai_api(self):
+        """Settings 'Test API' — verify credentials + model with a live ping."""
+        model = (
+            self.ai_model_var.get()
+            if hasattr(self, "ai_model_var")
+            else self.settings.get("ai_model", ai_assistant.DEFAULT_MODEL)
+        )
+        status = getattr(self, "ai_keys_status_lbl", None)
+        if status is not None:
+            status.config(text=f"Testing {model}…", fg=self.theme.get("warn", self.theme["fg"]))
+
+        def worker():
+            ok, detail, _dt = ai_assistant.probe_api(model=model)
+            self.after(0, self._test_ai_api_done, ok, detail)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_ai_api_done(self, ok, detail):
+        status = getattr(self, "ai_keys_status_lbl", None)
+        color = self.theme["good"] if ok else self.theme["bad"]
+        if status is not None:
+            status.config(text=detail, fg=color)
+        try:
+            if ok:
+                messagebox.showinfo(f"{APP_NAME} — API OK", detail)
+            else:
+                messagebox.showerror(f"{APP_NAME} — API failed", detail)
+        except Exception:
+            pass
+
+    # ---------- voice I/O — hold F9 to ask a question (personal edition) ----------
+    def _set_voice_status(self, text):
+        lbl = getattr(self, "voice_status_lbl", None)
+        if lbl is not None:
+            lbl.config(text=text)
+
+    def _on_ptt_press(self, _event=None):
+        if self._ptt_active or self.voice is None or not self.settings.get("voice_enabled", True):
+            return
+        if self._ask_busy or self._voice_busy:
+            self._set_voice_status("Still working on the last answer — wait a sec")
+            return
+        self._ptt_active = True
+        self._ptt_t0 = time.monotonic()
+        self._set_voice_status("Listening… (release F9 when done)")
+        self.voice.start_listening(self._on_voice_result, self._on_voice_error)
+
+    def _on_ptt_release(self, _event=None):
+        if not self._ptt_active or self.voice is None:
+            return
+        self._ptt_active = False
+        held = time.monotonic() - getattr(self, "_ptt_t0", time.monotonic())
+        logging.info("PTT released after %.1fs — stopping mic, starting STT", held)
+        self._set_voice_status("Transcribing speech…")
+        self.voice.stop_listening()
+
+    def _on_voice_result(self, text):
+        # Fires on the VoiceSTT background thread — dispatch to Tk.
+        self.after(0, self._handle_voice_question, text)
+
+    def _on_voice_error(self, exc):
+        self.after(0, self._set_voice_status, f"Voice error: {exc}")
+
+    def _voice_context_summary(self):
+        """Compact, diagnostic-ready live context for both typed chat and voice.
+
+        Values without engine state, units, or the app's health verdict are easy
+        for a model to misread.  Keep this small enough for fast voice replies,
+        while preserving the facts that change the diagnosis.
+        """
+        ctx = dict(self.latest)
+        if not ctx:
+            return ""
+        parts = [f"Engine state={j2534.engine_state(ctx)}"]
+        for pid, val in ctx.items():
+            if pid not in j2534.HEALTH_PIDS:
+                continue
+            name, _desc, units, _gmax, _gmin = _param(pid)
+            verdict = j2534.sensor_health(pid, val, ctx=ctx)
+            unit = f" {units}" if units and units != "state" else ""
+            status = f" ({verdict})" if verdict else ""
+            parts.append(f"{name}={val}{unit}{status}")
+        return ", ".join(parts)
+
+    def _on_chat_send(self):
+        text = (self.ai_chat_var.get() if hasattr(self, "ai_chat_var") else "") or ""
+        text = text.strip()
+        if not text:
+            return
+        self.ai_chat_var.set("")
+        self._ask_ai(text, speak=False, source="chat")
+
+    def _handle_voice_question(self, text):
+        if not text:
+            self._set_voice_status("Didn't catch that — hold F9 to try again")
+            self.after(2500, self._set_voice_status, "Hold F9 to ask a question")
+            return
+        text = speech_vocab.correct(text)
+        logging.info("Voice transcript ready: %r", text[:120])
+        self._ask_ai(text, speak=True, source="voice")
+
+    def _ask_ai(self, text, speak=False, source="chat"):
+        """Shared typed-chat + voice path into Grok (background thread)."""
+        if not text:
+            return
+        if self._ask_busy or self._voice_busy:
+            if source == "voice":
+                self._set_voice_status("Still working on the last question — try again shortly")
+                self.after(2500, self._set_voice_status, "Hold F9 to ask a question")
+            else:
+                log = getattr(self, "ai_log", None)
+                if log is not None:
+                    log.insert("end", "Still thinking about the last question — try again shortly.\n")
+                    log.see("end")
+            return
+        self._ask_busy = True
+        self._voice_busy = True
+        for_voice = source == "voice"
+        if for_voice:
+            self._set_voice_status(f"Thinking: \"{text}\"")
+        log = getattr(self, "ai_log", None)
+        if log is not None:
+            stamp = time.strftime("%H:%M:%S")
+            via = "voice" if for_voice else "chat"
+            log.insert("end", f"[{stamp}] You ({via}): {text}\n[{stamp}] …thinking…\n")
+            log.see("end")
+        context_summary = self._voice_context_summary()
+        prof = j2534.get_profile(self.settings.get("vehicle_profile"))
+        model = self.settings.get("ai_model", ai_assistant.DEFAULT_MODEL)
+        brief = self._memory_brief()
+        coll_ids = self._collection_ids()
+        history = list(self._chat_history)
+        threading.Thread(
+            target=self._ask_worker,
+            args=(text, context_summary, prof["name"], model, history, brief,
+                  coll_ids, speak, for_voice),
+            daemon=True,
+            name="AskAI",
+        ).start()
+
+    def _ask_worker(self, question, context_summary, vehicle_profile, model,
+                    history, memory_brief, collection_ids, speak, for_voice=False):
+        answer, new_history = None, None
+        t0 = time.monotonic()
+        try:
+            answer, new_history = ai_assistant.ask(
+                question, context_summary, vehicle_profile,
+                history=history, model=model, memory_brief=memory_brief,
+                collection_ids=collection_ids, for_voice=for_voice,
+            )
+        except Exception:
+            logging.exception("AI question request failed")
+        logging.info(
+            "Ask done in %.1fs voice=%s ok=%s",
+            time.monotonic() - t0, for_voice, bool(answer),
+        )
+        self.after(0, self._ask_done, question, answer, new_history, speak, for_voice)
+
+    def _ask_done(self, question, answer, new_history, speak, for_voice=False):
+        self._ask_busy = False
+        self._voice_busy = False
+        if new_history is not None:
+            self._chat_history = new_history  # only advance on success
+            self._session_turns.append({"role": "user", "content": question})
+            if answer:
+                self._session_turns.append({"role": "assistant", "content": answer})
+            self._memory_dirty = True
+            if len(self._session_turns) >= 4 and len(self._session_turns) % 6 == 0:
+                threading.Thread(target=self._consolidate_memory_worker, daemon=True).start()
+        if not answer:
+            answer = "Sorry, couldn't reach the AI just now — check connectivity / XAI_API_KEY."
+        log = getattr(self, "ai_log", None)
+        if log is not None:
+            stamp = time.strftime("%H:%M:%S")
+            log.insert("end", f"[{stamp}] Answer: {answer}\n\n")
+            log.see("end")
+        # Show text immediately; speak a clipped version so you hear it sooner.
+        if speak and self.voice is not None and self.settings.get("voice_enabled", True):
+            self._set_voice_status("Speaking answer…")
+            self.voice.speak(answer, clip=True)
+            # Reset hint after a short delay (don't wait for TTS to finish)
+            self.after(2500, self._set_voice_status, "Hold F9 to ask a question")
+        else:
+            self._set_voice_status("Hold F9 to ask a question")
+
+    def _upload_manual(self):
+        paths = filedialog.askopenfilenames(
+            title="Upload workshop manual / notes for 4G1 AI",
+            filetypes=[
+                ("Documents", "*.pdf;*.txt;*.md;*.docx;*.doc;*.html;*.csv"),
+                ("PDF", "*.pdf"),
+                ("Text", "*.txt;*.md"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not paths:
+            return
+        log = getattr(self, "ai_log", None)
+        if log is not None:
+            log.insert("end", f"Uploading {len(paths)} file(s) to xAI Collections…\n")
+            log.see("end")
+        threading.Thread(target=self._upload_manual_worker, args=(list(paths),), daemon=True).start()
+
+    def _upload_manual_worker(self, paths):
+        results = []
+        errors = []
+        local_ok = []
+        for path in paths:
+            try:
+                lname, nchars = ai_knowledge.ingest_local(self._knowledge, path)
+                local_ok.append((lname, nchars))
+            except Exception as e:
+                logging.exception("Local extract failed for %s", path)
+                errors.append(f"{os.path.basename(path)} (local): {e}")
+            if not (os.environ.get("XAI_MANAGEMENT_API_KEY") or "").strip():
+                errors.append(
+                    f"{os.path.basename(path)}: PDF management key missing — "
+                    "saved locally only. Click Get PDF Management Key, paste it, Save Keys, "
+                    "then upload again for cloud search."
+                )
+                continue
+            try:
+                file_id, cid, name = ai_knowledge.upload_document(self._knowledge, path)
+                results.append((name, file_id, cid))
+            except Exception as e:
+                logging.exception("Manual upload failed for %s", path)
+                errors.append(f"{os.path.basename(path)}: {e}")
+        try:
+            ai_knowledge.save_state(self._knowledge, KNOWLEDGE_PATH)
+        except Exception:
+            logging.exception("Could not save knowledge state after upload")
+        # keep settings in sync with collection id
+        cid = self._knowledge.get("collection_id") or ""
+        if cid:
+            self.settings["ai_collection_id"] = cid
+            try:
+                save_settings(self.settings)
+            except Exception:
+                pass
+        self.after(0, self._upload_manual_done, results, errors, local_ok)
+
+    def _upload_manual_done(self, results, errors, local_ok=None):
+        log = getattr(self, "ai_log", None)
+        stamp = time.strftime("%H:%M:%S")
+        local_ok = local_ok or []
+        if log is not None:
+            for name, nchars in local_ok:
+                log.insert(
+                    "end",
+                    f"[{stamp}] Local extract for AI: {name}  ({nchars} chars)\n",
+                )
+            for name, file_id, cid in results:
+                log.insert(
+                    "end",
+                    f"[{stamp}] Uploaded manual: {name}  (file {file_id}, collection {cid})\n",
+                )
+            for err in errors:
+                log.insert("end", f"[{stamp}] Upload note — {err}\n")
+            if results:
+                log.insert(
+                    "end",
+                    f"[{stamp}] Manuals may take a minute to index before search works fully.\n\n",
+                )
+            log.see("end")
+        lbl = getattr(self, "ai_knowledge_lbl", None)
+        if lbl is not None:
+            lbl.config(text=ai_knowledge.stats(self._knowledge))
+        lbl2 = getattr(self, "ai_knowledge_settings_lbl", None)
+        if lbl2 is not None:
+            lbl2.config(text=ai_knowledge.stats(self._knowledge))
+        if hasattr(self, "ai_collection_var"):
+            self.ai_collection_var.set(self._knowledge.get("collection_id") or "")
+        if results and not errors:
+            messagebox.showinfo(
+                "4G1 Live AI",
+                f"Uploaded {len(results)} manual(s) to xAI Collections.\n"
+                "Grok can search them once indexing finishes (usually under a minute).",
+            )
+        elif local_ok:
+            extra = ("\n\n" + "\n".join(errors[:4])) if errors else ""
+            messagebox.showinfo(
+                "4G1 Live AI",
+                f"Saved {len(local_ok)} manual(s) into local AI memory.\n"
+                "Cloud collection search still needs the PDF management key "
+                "(Get PDF Management Key → paste → Save Keys)."
+                + extra,
+            )
+        elif errors:
+            messagebox.showwarning(
+                "4G1 Live AI",
+                "Manual ingest failed:\n\n" + "\n".join(errors[:6]),
+            )
+
+    def _consolidate_memory_worker(self, force=False):
+        """Background: distill this session into durable memory (Grok or local).
+
+        force=True waits briefly if another consolidate is running, then proceeds
+        (used on app exit so we don't drop the last night's lessons).
+        """
+        if self._consolidate_busy:
+            if not force:
+                return
+            deadline = time.time() + 3.0
+            while self._consolidate_busy and time.time() < deadline:
+                time.sleep(0.05)
+            if self._consolidate_busy:
+                # Still busy — at least flush what we have locally.
+                try:
+                    ai_memory.save_memory(self._memory, MEMORY_PATH)
+                except Exception:
+                    logging.exception("Forced memory save while consolidate busy")
+                return
+        if not self._session_turns:
+            if self._memory_dirty:
+                ai_memory.save_memory(self._memory, MEMORY_PATH)
+                self._memory_dirty = False
+            return
+        self._consolidate_busy = True
+        try:
+            prof = j2534.get_profile(self.settings.get("vehicle_profile"))
+            profile_id = self.settings.get("vehicle_profile") or ""
+            brief = self._memory_brief()
+            model = self.settings.get("ai_model", ai_assistant.DEFAULT_MODEL)
+            turns = list(self._session_turns)
+            update = {}
+            try:
+                update = ai_assistant.consolidate(
+                    turns,
+                    memory_brief=brief,
+                    vehicle_profile_id=profile_id,
+                    vehicle_label=prof.get("name", ""),
+                    model=model,
+                )
+            except Exception:
+                logging.exception("Grok memory consolidate failed — using local fallback")
+                update = {}
+            if update:
+                ai_memory.apply_consolidation(self._memory, update)
+            else:
+                ai_memory.consolidate_local(
+                    self._memory, turns,
+                    vehicle_profile_id=profile_id,
+                    vehicle_label=prof.get("name", ""),
+                )
+            ai_memory.save_memory(self._memory, MEMORY_PATH)
+            self._memory_dirty = False
+            # Drop turns already folded into memory so we don't re-hash forever
+            if len(self._session_turns) == len(turns):
+                self._session_turns = []
+            else:
+                self._session_turns = self._session_turns[len(turns):]
+            logging.info("AI memory consolidated (%s)", ai_memory.memory_stats(self._memory))
+        except Exception:
+            logging.exception("Memory consolidate worker failed")
+        finally:
+            self._consolidate_busy = False
 
     # ---------- settings ----------
     def _settings_row(self, parent, label, widget_factory, hint=None):
@@ -1682,8 +2929,13 @@ class App(tk.Tk):
         self.theme_var = tk.StringVar(value=self.settings["theme"])
         tk.Label(sw, text="Theme", bg=t["panel"], fg=t["fg"],
                  font=ui_font(t, 10), width=16, anchor="w").pack(side="left")
-        ttk.Combobox(sw, textvariable=self.theme_var, values=list(THEMES),
-                     state="readonly", width=24).pack(side="left")
+        theme_cb = ttk.Combobox(sw, textvariable=self.theme_var, values=list(THEMES),
+                                state="readonly", width=24)
+        theme_cb.pack(side="left")
+        theme_cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self.after_idle(lambda: self._pick_theme(self.theme_var.get())),
+        )
 
         style_row = tk.Frame(card, bg=t["panel"])
         style_row.pack(fill="x", padx=16, pady=4)
@@ -1940,11 +3192,418 @@ class App(tk.Tk):
         for col in range(4):
             grid.grid_columnconfigure(col, weight=1, uniform="parameter")
 
+        # ---- AI assistant (personal edition) ----
+        aicard = tk.Frame(inner, bg=t["panel"],
+                          highlightbackground=t["border"], highlightthickness=1)
+        aicard.pack(fill="x", pady=(12, 0), padx=2)
+        tk.Frame(aicard, bg=t.get("accent2", t["accent"]), height=3).pack(fill="x")
+        tk.Label(aicard, text="AI ASSISTANT", bg=t["panel"], fg=t["dim"],
+                 font=ui_font(t, 8, bold=True)).pack(anchor="w", padx=16, pady=(12, 4))
+
+        ai_opt = tk.Frame(aicard, bg=t["panel"])
+        ai_opt.pack(fill="x", padx=16, pady=(0, 4))
+        self.ai_enabled_var = tk.BooleanVar(value=bool(self.settings.get("ai_enabled", True)))
+        tk.Checkbutton(
+            ai_opt, text="Enabled — explain sensor warnings and trends automatically",
+            variable=self.ai_enabled_var, bg=t["panel"], fg=t["fg"], selectcolor=t["elev"],
+            activebackground=t["panel"], activeforeground=t["fg"],
+            font=ui_font(t, 9), anchor="w",
+        ).pack(anchor="w", pady=1)
+
+        self.voice_enabled_var = tk.BooleanVar(value=bool(self.settings.get("voice_enabled", True)))
+        voice_text = "Voice — speak alerts aloud, hold F9 to ask a question"
+        if self.voice is None:
+            voice_text += "  (unavailable on this machine)"
+        tk.Checkbutton(
+            ai_opt, text=voice_text,
+            variable=self.voice_enabled_var, bg=t["panel"], fg=t["fg"], selectcolor=t["elev"],
+            activebackground=t["panel"], activeforeground=t["fg"],
+            font=ui_font(t, 9), anchor="w", state=("normal" if self.voice is not None else "disabled"),
+        ).pack(anchor="w", pady=1)
+
+        # Grok API keys (stored in secrets.env, not settings.json)
+        key_frame = tk.Frame(aicard, bg=t["panel"])
+        key_frame.pack(fill="x", padx=16, pady=(6, 2))
+        # Green when Grok login or console key is present (not only env console key)
+        _auth_ok = "MISSING" not in api_key_status()
+        self.ai_keys_status_lbl = tk.Label(
+            key_frame, text=api_key_status(),
+            bg=t["panel"], fg=t["good"] if _auth_ok else t["bad"],
+            font=ui_font(t, 8, bold=True),
+        )
+        self.ai_keys_status_lbl.pack(anchor="w")
+        tk.Label(
+            key_frame,
+            text="Usually auto via Grok login on this PC. Optional: paste console key below.",
+            bg=t["panel"], fg=t["muted"], font=ui_font(t, 8),
+        ).pack(anchor="w", pady=(0, 4))
+
+        xai_row = tk.Frame(aicard, bg=t["panel"])
+        xai_row.pack(fill="x", padx=16, pady=2)
+        tk.Label(xai_row, text="XAI API key", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 9), width=16, anchor="w").pack(side="left")
+        self.xai_key_var = tk.StringVar(value=os.environ.get("XAI_API_KEY", ""))
+        xai_entry = tk.Entry(
+            xai_row, textvariable=self.xai_key_var, show="•",
+            bg=t["panel2"], fg=t["fg"], insertbackground=t["fg"],
+            relief=("sunken" if t.get("xp") else "flat"),
+            bd=(2 if t.get("xp") else 0), font=ui_font(t, 9), width=40,
+        )
+        xai_entry.pack(side="left", fill="x", expand=True)
+        tk.Label(xai_row, text="  console.x.ai", bg=t["panel"], fg=t["muted"],
+                 font=ui_font(t, 8)).pack(side="left")
+
+        mgmt_row = tk.Frame(aicard, bg=t["panel"])
+        mgmt_row.pack(fill="x", padx=16, pady=2)
+        tk.Label(mgmt_row, text="PDF mgmt key", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 9), width=16, anchor="w").pack(side="left")
+        self.xai_mgmt_var = tk.StringVar(value=os.environ.get("XAI_MANAGEMENT_API_KEY", ""))
+        mgmt_entry = tk.Entry(
+            mgmt_row, textvariable=self.xai_mgmt_var, show="•",
+            bg=t["panel2"], fg=t["fg"], insertbackground=t["fg"],
+            relief=("sunken" if t.get("xp") else "flat"),
+            bd=(2 if t.get("xp") else 0), font=ui_font(t, 9), width=40,
+        )
+        mgmt_entry.pack(side="left", fill="x", expand=True)
+        SoftButton(mgmt_row, "Get Key", self._open_mgmt_console, t, primary=False).pack(
+            side="left", padx=(8, 0),
+        )
+        SoftButton(mgmt_row, "Save Keys", self._save_keys_now, t, primary=True).pack(
+            side="left", padx=(6, 0),
+        )
+        tk.Label(
+            aicard,
+            text="PDF management key is REQUIRED to upload manuals to xAI Collections. "
+            "Create one at console.x.ai → Settings → Management Keys "
+            "(tick AddFileToCollection + Collections). Then paste it above and Save Keys. "
+            "PDFs still get a local extract for the AI even without the cloud key.",
+            bg=t["panel"], fg=t["bad"] if not (os.environ.get("XAI_MANAGEMENT_API_KEY") or "").strip()
+            else t["good"],
+            font=ui_font(t, 8), wraplength=720, justify="left",
+        ).pack(anchor="w", padx=16, pady=(2, 6))
+
+        ai_name_row = tk.Frame(aicard, bg=t["panel"])
+        ai_name_row.pack(fill="x", padx=16, pady=4)
+        tk.Label(ai_name_row, text="Your name", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 9), width=16, anchor="w").pack(side="left")
+        self.ai_user_name_var = tk.StringVar(
+            value=self.settings.get("ai_user_name")
+            or self._memory.get("user_name")
+            or ai_memory.DEFAULT_USER_NAME
+        )
+        tk.Entry(
+            ai_name_row, textvariable=self.ai_user_name_var,
+            bg=t["elev"], fg=t["fg"], insertbackground=t["fg"],
+            relief="flat", font=ui_font(t, 9), width=24,
+        ).pack(side="left")
+        tk.Label(ai_name_row, text="  (AI greets you by name)", bg=t["panel"],
+                 fg=t["muted"], font=ui_font(t, 8)).pack(side="left")
+
+        ai_model_row = tk.Frame(aicard, bg=t["panel"])
+        ai_model_row.pack(fill="x", padx=16, pady=4)
+        tk.Label(ai_model_row, text="Model", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 9), width=16, anchor="w").pack(side="left")
+        self.ai_model_var = tk.StringVar(value=self.settings.get("ai_model", ai_assistant.DEFAULT_MODEL))
+        ttk.Combobox(
+            ai_model_row, textvariable=self.ai_model_var,
+            values=list(ai_assistant.MODEL_CHOICES),
+            state="readonly", width=32,
+        ).pack(side="left")
+        SoftButton(ai_model_row, "Test API", self._test_ai_api, t, primary=False).pack(
+            side="left", padx=10
+        )
+        tk.Label(ai_model_row, text="  4.5 default · 4.6 newest · non-reasoning = faster",
+                 bg=t["panel"], fg=t["muted"], font=ui_font(t, 8)).pack(side="left")
+
+        ai_baseline_row = tk.Frame(aicard, bg=t["panel"])
+        ai_baseline_row.pack(fill="x", padx=16, pady=(4, 4))
+        n_params = len(self._baseline)
+        self.ai_baseline_lbl = tk.Label(
+            ai_baseline_row, text=f"Learned baseline: {n_params} parameters from logged sessions",
+            bg=t["panel"], fg=t["muted"], font=ui_font(t, 8),
+        )
+        self.ai_baseline_lbl.pack(side="left")
+        SoftButton(ai_baseline_row, "Rebuild Baseline", self._rebuild_baseline_and_refresh, t,
+                   primary=False).pack(side="left", padx=12)
+
+        ai_mem_row = tk.Frame(aicard, bg=t["panel"])
+        ai_mem_row.pack(fill="x", padx=16, pady=(0, 4))
+        self.ai_memory_lbl = tk.Label(
+            ai_mem_row, text=ai_memory.memory_stats(self._memory),
+            bg=t["panel"], fg=t["muted"], font=ui_font(t, 8),
+        )
+        self.ai_memory_lbl.pack(side="left")
+        SoftButton(ai_mem_row, "Save Memory Now", self._force_consolidate_memory, t,
+                   primary=False).pack(side="left", padx=12)
+
+        ai_coll_row = tk.Frame(aicard, bg=t["panel"])
+        ai_coll_row.pack(fill="x", padx=16, pady=4)
+        tk.Label(ai_coll_row, text="Collection ID", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 9), width=16, anchor="w").pack(side="left")
+        self.ai_collection_var = tk.StringVar(
+            value=self.settings.get("ai_collection_id")
+            or self._knowledge.get("collection_id")
+            or ""
+        )
+        tk.Entry(
+            ai_coll_row, textvariable=self.ai_collection_var,
+            bg=t["elev"], fg=t["fg"], insertbackground=t["fg"],
+            relief="flat", font=ui_font(t, 9), width=36,
+        ).pack(side="left")
+        tk.Label(ai_coll_row, text="  (optional — auto-created on upload)", bg=t["panel"],
+                 fg=t["muted"], font=ui_font(t, 8)).pack(side="left")
+
+        ai_know_row = tk.Frame(aicard, bg=t["panel"])
+        ai_know_row.pack(fill="x", padx=16, pady=(0, 12))
+        self.ai_knowledge_settings_lbl = tk.Label(
+            ai_know_row, text=ai_knowledge.stats(self._knowledge),
+            bg=t["panel"], fg=t["muted"], font=ui_font(t, 8),
+        )
+        self.ai_knowledge_settings_lbl.pack(side="left")
+        SoftButton(ai_know_row, "Upload Manual…", self._upload_manual, t,
+                   primary=False).pack(side="left", padx=12)
+
         act = tk.Frame(inner, bg=t["bg"])
         act.pack(fill="x", pady=12, padx=2)
         SoftButton(act, "Apply Settings", self.apply_settings, t, primary=True).pack(side="left")
         SoftButton(act, "Reset Connection Defaults", self._reset_conn_defaults, t,
                    primary=False).pack(side="left", padx=8)
+
+    def _open_mgmt_console(self):
+        """Open the xAI page where a Collections management key is created."""
+        url = "https://console.x.ai/team/default/settings/management-keys"
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            logging.exception("Could not open management-key console")
+        messagebox.showinfo(
+            "PDF management key",
+            "Browser opened at xAI Management Keys.\n\n"
+            "1. Create Management Key\n"
+            "2. Tick AddFileToCollection and Collections (create/update)\n"
+            "3. Copy the key once (it is not shown again)\n"
+            "4. Paste it in Settings → PDF mgmt key\n"
+            "5. Click Save Keys, then Upload Manual…\n\n"
+            f"{url}",
+        )
+
+    def _save_keys_now(self):
+        """Write API + management keys without rebuilding the whole UI."""
+        api = self.xai_key_var.get() if hasattr(self, "xai_key_var") else ""
+        mgmt = self.xai_mgmt_var.get() if hasattr(self, "xai_mgmt_var") else ""
+        save_secrets({
+            "XAI_API_KEY": api,
+            "XAI_MANAGEMENT_API_KEY": mgmt,
+        })
+        status = api_key_status()
+        lbl = getattr(self, "ai_keys_status_lbl", None)
+        if lbl is not None:
+            ok = "MISSING" not in status
+            lbl.config(text=status, fg=self.theme["good"] if ok else self.theme["bad"])
+        if (mgmt or "").strip():
+            messagebox.showinfo(
+                "4G1 Live AI",
+                "Keys saved.\nPDF management key is set — Upload Manual… can now "
+                "push workshop PDFs into xAI Collections for search.",
+            )
+        else:
+            messagebox.showwarning(
+                "4G1 Live AI",
+                "API key saved, but the PDF management key is still empty.\n"
+                "Click Get Key, create one in the console, paste it, then Save Keys.",
+            )
+
+    def analyse_tactrix_log(self):
+        """Open the newest known Tactrix/4G1 CSV, or let the user pick one."""
+        try:
+            path = tactrix_log.discover_latest_log()
+        except tactrix_log.TactrixLogError:
+            path = None
+        if path is None:
+            self._choose_tactrix_csv()
+            return
+        self._run_tactrix_analysis(path)
+
+    def _choose_tactrix_csv(self):
+        starters = [
+            # shed/race logs land here via "TRM Shed Run.bat" - and this path
+            # is on C:, so it still works with G: unplugged at the car
+            r"C:\Users\trmra\TRM RaceLogs",
+            r"G:\Users\trmra\OneDrive\Desktop\Tactrix Logs MLV",
+            os.path.join(os.environ.get("USERPROFILE", ""), "OneDrive", "Desktop", "Tactrix Logs MLV"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "4G1 Live AI", "Sessions"),
+        ]
+        initial = next((p for p in starters if os.path.isdir(p)), os.path.expanduser("~"))
+        path = filedialog.askopenfilename(
+            title="Choose Tactrix / 4G1 log CSV",
+            filetypes=[("CSV logs", "*.csv"), ("All files", "*.*")],
+            initialdir=initial,
+        )
+        if path:
+            self._run_tactrix_analysis(path)
+
+    def _run_tactrix_analysis(self, path):
+        try:
+            analysis = tactrix_log.analyse_log(
+                path, profile_id=self.settings.get("vehicle_profile")
+            )
+            report = tactrix_log.format_analysis(analysis)
+        except (tactrix_log.TactrixLogError, OSError) as exc:
+            messagebox.showerror("4G1 Live AI — Log", str(exc))
+            return
+        self._last_log_report = report
+        self._show_tactrix_analysis(analysis, report)
+        log = getattr(self, "ai_log", None)
+        if log is not None:
+            stamp = time.strftime("%H:%M:%S")
+            log.insert("end", f"[{stamp}] Analysing Tactrix log: {os.path.basename(path)}\n")
+            log.see("end")
+        threading.Thread(
+            target=self._tactrix_ai_worker, args=(report,), daemon=True, name="LogAI"
+        ).start()
+
+    def _tactrix_ai_worker(self, report):
+        answer = None
+        try:
+            prof = j2534.get_profile(self.settings.get("vehicle_profile"))
+            answer = ai_assistant.interpret_log(
+                report,
+                vehicle_profile=prof.get("name", "4G15 12V"),
+                memory_brief=self._memory_brief(),
+                model=self.settings.get("ai_model", ai_assistant.DEFAULT_MODEL),
+                collection_ids=self._collection_ids(),
+            )
+        except Exception:
+            logging.exception("AI log interpretation failed")
+        self.after(0, self._tactrix_ai_done, answer)
+
+    def _tactrix_ai_done(self, answer):
+        if not answer:
+            answer = (
+                "Log numbers are above — use those. "
+                "Grok write-up timed out or failed. Ask in the AI tab if you want a reread."
+            )
+        log = getattr(self, "ai_log", None)
+        if log is not None:
+            stamp = time.strftime("%H:%M:%S")
+            log.insert("end", f"[{stamp}] Log AI: {answer}\n\n")
+            log.see("end")
+        win = getattr(self, "_tactrix_review_window", None)
+        box = getattr(self, "_tactrix_ai_box", None)
+        if box is not None and win is not None and win.winfo_exists():
+            try:
+                box.configure(state="normal")
+                box.delete("1.0", "end")
+                box.insert("1.0", answer)
+                box.configure(state="disabled")
+            except Exception:
+                pass
+
+    def _show_tactrix_analysis(self, analysis, report):
+        t = self.theme
+        existing = getattr(self, "_tactrix_review_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+        win = tk.Toplevel(self, bg=t["bg"])
+        self._tactrix_review_window = win
+        win.title("4G1 Live AI — Tactrix Log")
+        win.transient(self)
+        win.geometry("900x720")
+        win.minsize(760, 560)
+        try:
+            win.iconbitmap(ICON_PATH)
+        except Exception:
+            pass
+        outer, panel = card(win, t, title="Tactrix / 4G1 Log Analysis")
+        outer.pack(fill="both", expand=True, padx=12, pady=12)
+
+        verdict = analysis.verdict
+        call = verdict.call if verdict else "WATCH"
+        banner_bg = {"NORMAL": "#0A7B26", "WATCH": "#B07000", "FIX NOW": "#C00000"}.get(call, t["accent"])
+        banner = tk.Frame(panel, bg=banner_bg)
+        banner.pack(fill="x", padx=8, pady=(8, 6))
+        tk.Label(
+            banner, text=call, bg=banner_bg, fg="#FFFFFF",
+            font=ui_font(t, 16, bold=True),
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+        tk.Label(
+            banner, text=(verdict.headline if verdict else analysis.source_path.name),
+            bg=banner_bg, fg="#FFFFFF", font=ui_font(t, 10),
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        heroes = tk.Frame(panel, bg=t["panel"])
+        heroes.pack(fill="x", padx=8, pady=(0, 6))
+        rpm = analysis.pid_stats.get(0x21)
+        cool = analysis.pid_stats.get(0x07) or analysis.pid_stats.get(0x10)
+        batt = analysis.wot_stats.get(0x14) or analysis.pid_stats.get(0x14)
+        tiles = [
+            ("PEAK RPM", f"{rpm.maximum:.0f}" if rpm else "—"),
+            ("COOLANT", f"{cool.maximum:.0f}°C" if cool else "—"),
+            ("WOT BATT", f"{batt.minimum:.1f} V" if batt else "—"),
+            ("WOT PULLS", str(analysis.wot_pulls)),
+            ("TIME", f"{analysis.duration_seconds:.0f}s"),
+        ]
+        for label, value in tiles:
+            cell = tk.Frame(heroes, bg=t["panel2"], highlightbackground=t.get("win_border", t["border"]),
+                            highlightthickness=1)
+            cell.pack(side="left", fill="both", expand=True, padx=3)
+            tk.Label(cell, text=label, bg=t["panel2"], fg=t["dim"],
+                     font=ui_font(t, 7, bold=True)).pack(anchor="w", padx=8, pady=(6, 0))
+            tk.Label(cell, text=value, bg=t["panel2"], fg=t.get("value", t["fg"]),
+                     font=ui_font(t, 16, bold=True, mono=True)).pack(anchor="w", padx=8, pady=(0, 6))
+
+        findings = (verdict.findings if verdict else [])[:8]
+        find_box = tk.Frame(panel, bg=t["panel"])
+        find_box.pack(fill="x", padx=10, pady=(0, 6))
+        tk.Label(find_box, text="WHAT IT MEANS", bg=t["panel"], fg=t["dim"],
+                 font=ui_font(t, 8, bold=True)).pack(anchor="w")
+        for item in findings:
+            tk.Label(
+                find_box, text="•  " + item, bg=t["panel"], fg=t["fg"],
+                font=ui_font(t, 9), wraplength=820, justify="left", anchor="w",
+            ).pack(fill="x", pady=1)
+
+        text = tk.Text(
+            panel, bg=t["chart"], fg=t["fg"], relief="sunken" if t.get("xp") else "flat",
+            font=ui_font(t, 9, mono=True), wrap="word", padx=10, pady=8,
+            insertbackground=t["fg"], selectbackground=t["panel2"], height=10,
+        )
+        text.insert("1.0", report)
+        text.configure(state="disabled")
+        text.pack(fill="both", expand=True, padx=10, pady=(4, 6))
+        self._tactrix_report_box = text
+
+        tk.Label(
+            panel, text="GROK (extra — numbers above already stand)",
+            bg=t["panel"], fg=t["dim"], font=ui_font(t, 8, bold=True),
+        ).pack(anchor="w", padx=10)
+        ai_box = tk.Text(
+            panel, bg=t["panel2"], fg=t["fg"], relief="sunken" if t.get("xp") else "flat",
+            font=ui_font(t, 9), wrap="word", padx=10, pady=8, height=5,
+            insertbackground=t["fg"],
+        )
+        ai_box.insert("1.0", "Optional Grok note loading…")
+        ai_box.configure(state="disabled")
+        ai_box.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self._tactrix_ai_box = ai_box
+
+        actions = tk.Frame(panel, bg=t["panel"])
+        actions.pack(fill="x", padx=10, pady=(0, 10))
+        SoftButton(actions, "Open Another CSV", lambda: (win.destroy(), self._choose_tactrix_csv()), t).pack(
+            side="left"
+        )
+
+        def _copy_report():
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(report)
+            except Exception:
+                pass
+
+        SoftButton(actions, "Copy Report", _copy_report, t).pack(side="left", padx=8)
+        SoftButton(actions, "Close", win.destroy, t).pack(side="right")
+        win.bind("<Escape>", lambda _e: win.destroy())
 
     def _browse_dll(self):
         path = filedialog.askopenfilename(
@@ -1980,6 +3639,12 @@ class App(tk.Tk):
     def _pick_theme(self, name):
         self.theme_var.set(name)
         self.settings["theme"] = name
+        save_settings(self.settings)
+        self.theme = dict(THEMES.get(name, THEMES["Windows XP"]))
+        self._resolve_theme_fonts()
+        tab = getattr(self, "_active_tab", "settings")
+        self.rebuild_ui()
+        self._show_tab(tab)
 
     def _parse_init_addr(self, text):
         text = (text or "0x00").strip().lower()
@@ -2024,6 +3689,34 @@ class App(tk.Tk):
         self.settings["pin1_ground"] = bool(self.pin1_var.get())
         self.settings["auto_connect"] = bool(self.auto_conn_var.get())
         self.settings["auto_live"] = bool(self.auto_live_var.get())
+        if hasattr(self, "ai_enabled_var"):
+            self.settings["ai_enabled"] = bool(self.ai_enabled_var.get())
+        if hasattr(self, "ai_model_var"):
+            self.settings["ai_model"] = self.ai_model_var.get()
+            # Remember deliberate model picks so we don't re-migrate off grok-4.5
+            self.settings["_ai_model_user_set"] = True
+        if hasattr(self, "ai_user_name_var"):
+            name = (self.ai_user_name_var.get() or "").strip() or ai_memory.DEFAULT_USER_NAME
+            self.settings["ai_user_name"] = name
+            ai_memory.set_user_name(self._memory, name)
+            self._memory_dirty = True
+            ai_memory.save_memory(self._memory, MEMORY_PATH)
+        if hasattr(self, "ai_collection_var"):
+            cid = (self.ai_collection_var.get() or "").strip()
+            self.settings["ai_collection_id"] = cid
+            if cid:
+                ai_knowledge.set_collection_id(self._knowledge, cid)
+            ai_knowledge.save_state(self._knowledge, KNOWLEDGE_PATH)
+        if hasattr(self, "voice_enabled_var"):
+            self.settings["voice_enabled"] = bool(self.voice_enabled_var.get())
+        # Persist Grok keys into secrets.env (not settings.json)
+        if hasattr(self, "xai_key_var") or hasattr(self, "xai_mgmt_var"):
+            save_secrets({
+                "XAI_API_KEY": self.xai_key_var.get() if hasattr(self, "xai_key_var") else "",
+                "XAI_MANAGEMENT_API_KEY": (
+                    self.xai_mgmt_var.get() if hasattr(self, "xai_mgmt_var") else ""
+                ),
+            })
         # if already connected, update runtime timeout/baud on device object
         if self.dev:
             self.dev.request_timeout_ms = self.settings["request_timeout_ms"]
@@ -2044,7 +3737,7 @@ class App(tk.Tk):
             w.destroy()
         self.configure(bg=self.theme["bg"])
         prof = self._active_profile()
-        self.title(f"4G1 Live  —  {prof['short']}  ·  MUT-II")
+        self.title(f"{APP_NAME}  —  {prof['short']}  ·  MUT-II")
         self.gauges = {}
         self.heroes = {}
         self._build()
@@ -2118,7 +3811,7 @@ class App(tk.Tk):
         would otherwise keep showing its last readings under a LIVE header.
         Anything older than a few seconds is not live data, so say so.
         """
-        if self.demo or not self.live:
+        if not self.live:
             self._stale_flagged = False
             return
         last = self._hz_times[-1] if self._hz_times else self._session_t0
@@ -2145,8 +3838,6 @@ class App(tk.Tk):
         )
 
     def on_connect(self):
-        if self.demo:
-            return
         if self.dev:
             if self.live:
                 messagebox.showinfo(APP_NAME, "Stop Live Data before disconnecting the adapter.")
@@ -2194,81 +3885,6 @@ class App(tk.Tk):
         self.foot_right.config(text="Adapter disconnected  ·  Ready")
         self.log_line("Adapter disconnected")
 
-    def toggle_demo(self):
-        """Run a realistic, clearly labelled dashboard demonstration."""
-        if self.demo:
-            self.live = False
-            self.demo = False
-            self.demo_btn.config(text="Explore Demo")
-            self.connect_btn.config(state="normal")
-            self.live_btn.config(text="Start Live Data", state="disabled")
-            self._set_status("OFFLINE", "off")
-            self.dev_info.config(text="—")
-            self.foot_right.config(text="Demo ended  ·  Ready")
-            self.log_line("Demo session ended")
-            self._session_t0 = None
-            self._update_idle_banner()
-            return
-        if self.live or self.dev:
-            messagebox.showinfo(APP_NAME, "Disconnect the live session before starting Demo mode.")
-            return
-        self.demo = True
-        self.live = True
-        self.latest.clear()
-        self.samples = []
-        self._log_rows = []
-        self._hz_times.clear()
-        self._session_t0 = time.monotonic()
-        self._autosave_start("demo")
-        self.demo_btn.config(text="Stop Demo")
-        self.connect_btn.config(state="disabled")
-        self.live_btn.config(text="Demo Mode", state="disabled")
-        self._set_status("DEMO", "warn")
-        self.dev_info.config(text="SIMULATED DATA  ·  NO VEHICLE")
-        self.log_line("Demo mode started — all values are simulated")
-        for chart_name in ("chart_rpm", "chart_load"):
-            chart = getattr(self, chart_name, None)
-            if chart:
-                chart.clear()
-        self._update_idle_banner()
-        self._demo_tick()
-
-    def _demo_tick(self):
-        if not self.demo or self._closing:
-            return
-        elapsed = time.monotonic() - self._session_t0
-        pulse = (math.sin(elapsed * 0.55) + 1.0) / 2.0
-        rpm = 760 + 55 * math.sin(elapsed * 1.4)
-        values = {
-            0x21: rpm, 0x06: 9 + 2 * math.sin(elapsed),
-            0x07: min(92, 76 + elapsed * 0.18),
-            0x3A: 28 + math.sin(elapsed * 0.2),
-            0x17: 2.2 + pulse * 1.2, 0x14: 14.1 + 0.08 * math.sin(elapsed),
-            0x15: 100.5, 0x1A: 38 + 4 * math.sin(elapsed * 1.5),
-            0x1C: 24 + 3 * math.sin(elapsed * 0.7), 0x2F: 0.0,
-            0x29: 2.6 + 0.25 * math.sin(elapsed * 0.9),
-            0x13: 0.45 + 0.34 * math.sin(elapsed * 4.8),
-            0x0C: 1.5, 0x0D: -0.8, 0x0E: 0.4, 0x26: 0.0,
-            0x27: 128.0, 0x24: 780.0, 0x16: 31.0, 0x38: 5.4,
-        }
-        # Switch byte 0x1B: one bit flicks periodically (bitfield decode pending)
-        values[0x1B] = 0x08 if (int(elapsed) % 9) < 2 else 0x00
-        # ECU-scaled temps mirror the raw NTC channels in demo
-        values[0x10] = values[0x07]
-        values[0x11] = values[0x3A]
-        self.latest.update(values)
-        snap = {"t": round(time.monotonic(), 3), "mode": "DEMO"}
-        for pid in set(self.gauges) | set(self.heroes) | {0x1C, 0x21}:
-            if pid in values:
-                snap[_param(pid)[0]] = round(values[pid], 2)
-        self.samples.append(snap)
-        self._autosave_row(snap)
-        self._hz_times.append(time.monotonic())
-        if len(self._hz_times) >= 2:
-            dt = self._hz_times[-1] - self._hz_times[0]
-            self._poll_hz_actual = ((len(self._hz_times) - 1) / dt) if dt else 0
-        self.after(max(50, int(1000 / max(1, self.settings.get("poll_hz", 10)))),
-                   self._demo_tick)
 
     def toggle_live(self):
         if self.live:
@@ -2454,6 +4070,7 @@ class App(tk.Tk):
                 self.chart_rpm.push(self.latest[0x21])
             if 0x1C in self.latest and hasattr(self, "chart_load"):
                 self.chart_load.push(self.latest[0x1C])
+            self._maybe_explain_transitions(ctx)
 
         if self.live and self.samples and (not self._log_rows or self.samples[-1] is not self._log_rows[-1]):
             s = self.samples[-1]
@@ -2511,36 +4128,67 @@ class App(tk.Tk):
         self.samples = []
         self._log_rows = []
 
+    def _autosave_columns(self):
+        """Stable session schema, known before the first live sample arrives.
+
+        Writing the header at session open makes every CSV self-describing even
+        when an adapter drops before the first sample.  A stable gauge/hero
+        schema also prevents later rows from gaining values with no matching
+        column name.
+        """
+        columns = ["t", "mode"]
+        for pid in list(getattr(self, "gauges", []) or []) + list(getattr(self, "heroes", []) or []):
+            if pid not in j2534.ALL_PARAMS:
+                continue
+            name = _param(pid)[0]
+            if name not in columns:
+                columns.append(name)
+        return columns
+
     def _autosave_start(self, tag="live"):
-        """Open a crash-safe session CSV. Every sample is appended as it is
-        captured, so a crash, a flat battery or an accidental restart can
-        never lose a session again."""
+        """Open a crash-safe, self-describing session CSV.
+
+        The header is committed before polling starts, so every newly created
+        file has a header row—even if the ECU disconnects immediately.
+        """
         self._autosave_path = None
         self._autosave_cols = None
         self._autosave_fh = None
+        self._autosave_writer = None
         try:
             os.makedirs(SESSION_DIR, exist_ok=True)
             name = time.strftime(f"4g1_{tag}_%Y%m%d_%H%M%S.csv")
             path = os.path.join(SESSION_DIR, name)
-            self._autosave_fh = open(path, "w", newline="", encoding="utf-8")
+            fh = open(path, "w", newline="", encoding="utf-8")
+            columns = self._autosave_columns()
+            writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            fh.flush()  # Persist the header before the first poll / adapter failure.
+            self._autosave_fh = fh
+            self._autosave_cols = columns
+            self._autosave_writer = writer
             self._autosave_path = path
             self.log_line(f"Auto-saving this session to {path}")
         except Exception:
             logging.exception("Could not open autosave file")
+            fh = getattr(self, "_autosave_fh", None)
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
             self._autosave_fh = None
+            self._autosave_writer = None
 
     def _autosave_row(self, snap):
         fh = getattr(self, "_autosave_fh", None)
-        if fh is None:
+        writer = getattr(self, "_autosave_writer", None)
+        if fh is None or writer is None:
             return
         try:
-            if self._autosave_cols is None:
-                self._autosave_cols = list(snap.keys())
-                fh.write(",".join(self._autosave_cols) + "\n")
-            for k in snap:
-                if k not in self._autosave_cols:
-                    self._autosave_cols.append(k)
-            fh.write(",".join(str(snap.get(c, "")) for c in self._autosave_cols) + "\n")
+            # The schema is intentionally fixed at session start.  All normal
+            # live samples use the active gauges and heroes that seeded it.
+            writer.writerow(snap or {})
             fh.flush()   # flush every row — the whole point is crash safety
         except Exception:
             logging.exception("Autosave row failed")
@@ -2549,6 +4197,7 @@ class App(tk.Tk):
             except Exception:
                 pass
             self._autosave_fh = None
+            self._autosave_writer = None
 
     def _autosave_stop(self):
         fh = getattr(self, "_autosave_fh", None)
@@ -2558,6 +4207,7 @@ class App(tk.Tk):
             except Exception:
                 pass
         self._autosave_fh = None
+        self._autosave_writer = None
         path = getattr(self, "_autosave_path", None)
         if path:
             self.log_line(f"Session saved: {path}")
@@ -2614,9 +4264,6 @@ class App(tk.Tk):
         a load change). Channels whose raw byte moves between passes are live
         sensors — that is how the real MAP request gets identified.
         """
-        if self.demo:
-            messagebox.showinfo(APP_NAME, "Sweep needs a real ECU — demo data is simulated.")
-            return
         if not self.dev:
             messagebox.showwarning(APP_NAME, "Connect the adapter first.")
             return
@@ -2710,36 +4357,61 @@ class App(tk.Tk):
             if reconnect:
                 pin1 = self._mut_session_start()
             codes = self.dev.read_dtcs()
+            # Also dump every candidate fault register raw. Which request
+            # actually carries DTCs on this ECU is genuinely unknown (three
+            # sources disagree, and live ROM tracing contradicts two of them),
+            # so show the bytes and let the car settle it.
+            try:
+                cand = self.dev.read_dtc_candidates()
+            except Exception:
+                cand = None
             if reconnect:
                 self._mut_session_end(pin1)
         except Exception as e:
             self.codes_box.insert("end", f"Read failed: {e}\n(ignition on?)\n")
             return
+        if cand:
+            self.codes_box.insert("end", "Candidate fault registers (RAW):\n")
+            for req in sorted(cand):
+                v = cand[req]
+                shown = "no reply" if v is None else f"0x{int(v):02X}  ({int(v)})"
+                self.codes_box.insert("end", f"   request 0x{req:02X} = {shown}\n")
+            self.codes_box.insert(
+                "end",
+                "\nTO IDENTIFY THE REAL FAULT REGISTER: note these values with\n"
+                "the engine healthy, then unplug one sensor at idle and read\n"
+                "again. Whichever register CHANGES is the fault register on\n"
+                "this ECU. Nothing below is trustworthy until that is done.\n\n")
         if codes is None:
             self.codes_box.insert("end", "No response from ECU.\n")
             return
         if not codes:
-            # An empty fault mask is NOT proof of a healthy engine. DTC reads
-            # use requests 0x38/0x39, and on some MUT-II ECUs those addresses
-            # serve live data instead of a fault bitmask — on the CE 4G15 this
-            # was developed against, 0x38 returned a constant 0.0 for an entire
-            # running session. Never let this screen imply a clean bill of health.
+            # An empty result is NOT proof of a healthy engine. The registers
+            # are now correct (0x36 count, 0x47/0x48 mask), but the bit-to-code
+            # mapping is still unverified on this ECU family, so keep the
+            # wording honest and never imply a clean bill of health.
             self.codes_box.insert("end", "No trouble codes returned.\n\n")
             self.codes_box.insert(
                 "end",
                 "This is NOT confirmation that the engine is fault-free.\n\n"
-                "Fault codes are read from requests 0x38/0x39. On some MUT-II\n"
-                "ECUs those addresses carry live data rather than a fault mask,\n"
-                "so an empty result can mean either:\n"
-                "   - no faults are stored, or\n"
-                "   - this ECU does not report faults at those addresses.\n\n"
-                "Confirm with a factory-level scan tool before declaring a\n"
-                "vehicle fault-free. Use Sweep Requests to see what this ECU\n"
-                "actually serves.\n")
+                "Codes now come from the correct registers — 0x36 active fault\n"
+                "count, 0x47/0x48 active fault mask. An empty result means the\n"
+                "ECU reported a zero active-fault count, which is meaningful\n"
+                "but not conclusive:\n"
+                "   - stored (historic) faults live at 0x37 / 0x40-0x45 and\n"
+                "     are not read here yet, and\n"
+                "   - the bit-to-code mapping has not been confirmed on this\n"
+                "     ECU, so a set bit could go unnamed.\n\n"
+                "To validate this screen: unplug one sensor at idle and check\n"
+                "that the active-fault count goes non-zero.\n")
             return
         self.codes_box.insert("end", f"{len(codes)} code(s) present:\n\n")
         for code, desc in codes:
-            self.codes_box.insert("end", f"  #{code:02d}   {desc}\n")
+            # code is normally an int MUT code, but read_dtcs may also return a
+            # plain-text summary row (ECU reported N active faults with no
+            # matching bit), so format defensively rather than assuming int.
+            label = f"#{code:02d}" if isinstance(code, int) else str(code)
+            self.codes_box.insert("end", f"  {label}   {desc}\n")
 
     def clear_codes(self):
         if not self.dev:
@@ -2759,20 +4431,240 @@ class App(tk.Tk):
         except Exception as e:
             self.codes_box.insert("end", f"Clear failed: {e}\n")
 
+    def _force_consolidate_memory(self):
+        """Settings button: fold current session into durable memory now."""
+        if self._consolidate_busy:
+            messagebox.showinfo("4G1 Live AI", "Memory save already in progress.")
+            return
+        if not self._session_turns and not self._memory_dirty:
+            # Still refresh name from settings into memory
+            name = (self.settings.get("ai_user_name") or "").strip()
+            if name:
+                ai_memory.set_user_name(self._memory, name)
+            ai_memory.save_memory(self._memory, MEMORY_PATH)
+            lbl = getattr(self, "ai_memory_lbl", None)
+            if lbl is not None:
+                lbl.config(text=ai_memory.memory_stats(self._memory))
+            messagebox.showinfo("4G1 Live AI", "Memory saved.\n" + ai_memory.memory_stats(self._memory))
+            return
+
+        def _run():
+            self._consolidate_memory_worker()
+            self.after(0, self._after_force_consolidate)
+
+        threading.Thread(target=_run, daemon=True).start()
+        messagebox.showinfo("4G1 Live AI", "Learning from this session… (saves in background)")
+
+    def _after_force_consolidate(self):
+        lbl = getattr(self, "ai_memory_lbl", None)
+        if lbl is not None:
+            lbl.config(text=ai_memory.memory_stats(self._memory))
+        log = getattr(self, "ai_log", None)
+        if log is not None:
+            stamp = time.strftime("%H:%M:%S")
+            log.insert("end", f"[{stamp}] Memory updated — {ai_memory.memory_stats(self._memory)}\n\n")
+            log.see("end")
+
     def destroy(self):
         self._closing = True
         self.live = False
-        self.demo = False
+        # On exit: NEVER block on network. Local memory write only.
+        # (Grok consolidate mid-session / Save Memory Now still use the API.)
+        try:
+            if self._session_turns:
+                prof = j2534.get_profile(self.settings.get("vehicle_profile"))
+                ai_memory.consolidate_local(
+                    self._memory,
+                    list(self._session_turns),
+                    vehicle_profile_id=self.settings.get("vehicle_profile") or "",
+                    vehicle_label=prof.get("name", ""),
+                )
+                self._session_turns = []
+            ai_memory.save_memory(self._memory, MEMORY_PATH)
+        except Exception:
+            logging.exception("Failed to persist AI memory on exit")
         try:
             if self.dev:
                 self.dev.close()
         except Exception:
             pass
-        super().destroy()
+        try:
+            if self.voice is not None:
+                self.voice.shutdown()
+        except Exception:
+            pass
+        try:
+            super().destroy()
+        except Exception:
+            logging.exception("Tk destroy failed")
+
+
+def _install_crash_hooks():
+    """Log startup/main-thread crashes when launched via pythonw (no console)."""
+    crash_path = os.path.join(LOG_DIR, "crash.log")
+
+    def _write(msg):
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(crash_path, "a", encoding="utf-8") as f:
+                f.write(msg)
+                if not msg.endswith("\n"):
+                    f.write("\n")
+        except Exception:
+            pass
+
+    def _hook(exc_type, exc, tb):
+        detail = "".join(traceback.format_exception(exc_type, exc, tb))
+        _write(f"\n---- {time.strftime('%Y-%m-%d %H:%M:%S')} ----\n{detail}")
+        logging.error("Uncaught exception", exc_info=(exc_type, exc, tb))
+        try:
+            # Last-ditch visible error when pythonw has no console
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"{APP_NAME} crashed.\n\nSee:\n{crash_path}\n\n{exc_type.__name__}: {exc}",
+                f"{APP_NAME} crash",
+                0x10,
+            )
+        except Exception:
+            pass
+
+    sys.excepthook = _hook
+
+
+def _focus_existing_instance():
+    """If another 4G1 Live AI window is already open, bring it forward."""
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def _enum(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value or ""
+            if title.startswith(APP_NAME):
+                found.append(hwnd)
+            return True
+
+        user32.EnumWindows(_enum, 0)
+        if not found:
+            return False
+        hwnd = found[0]
+        SW_RESTORE = 9
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        logging.info("Another instance is already open — focused existing window")
+        return True
+    except Exception:
+        logging.exception("Could not focus existing instance")
+        return False
+
+
+def _pid_is_alive(pid):
+    if not pid or pid <= 0:
+        return False
+    try:
+        # Windows: OpenProcess + exit code still-active check
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return code.value == 259  # STILL_ACTIVE
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
+def _acquire_single_instance():
+    """One live UI at a time. Uses a PID lock file (survives messy pythonw exits).
+
+    Returns True if this process should continue, False if we handed off to
+    an already-running window and should exit.
+    """
+    if sys.platform != "win32":
+        return True
+    if "--allow-multi" in sys.argv:
+        return True
+    lock_path = os.path.join(USER_DATA_DIR, "instance.pid")
+    try:
+        os.makedirs(USER_DATA_DIR, exist_ok=True)
+        old_pid = None
+        if os.path.isfile(lock_path):
+            try:
+                with open(lock_path, encoding="utf-8") as f:
+                    old_pid = int((f.read() or "").strip() or "0")
+            except Exception:
+                old_pid = None
+        if old_pid and old_pid != os.getpid() and _pid_is_alive(old_pid):
+            # Another live process — focus its window if possible
+            for _ in range(4):
+                if _focus_existing_instance():
+                    logging.info("Handed off to existing instance pid=%s", old_pid)
+                    return False
+                time.sleep(0.4)
+            # Alive but no window → almost certainly a zombie hang
+            logging.warning("Stale instance pid=%s has no window — taking over", old_pid)
+            try:
+                # PROCESS_TERMINATE = 0x0001
+                h = ctypes.windll.kernel32.OpenProcess(0x0001, False, int(old_pid))
+                if h:
+                    ctypes.windll.kernel32.TerminateProcess(h, 1)
+                    ctypes.windll.kernel32.CloseHandle(h)
+            except Exception:
+                logging.exception("Could not terminate stale pid=%s", old_pid)
+        # Claim lock
+        with open(lock_path, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        return True
+    except Exception:
+        logging.exception("Single-instance check failed — continuing")
+        return True
 
 
 if __name__ == "__main__":
-    app = App()
+    _install_crash_hooks()
+    if not _acquire_single_instance():
+        sys.exit(0)
+    try:
+        app = App()
+    except Exception:
+        logging.exception("App failed during startup")
+        detail = traceback.format_exc()
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(os.path.join(LOG_DIR, "crash.log"), "a", encoding="utf-8") as f:
+                f.write(f"\n---- startup {time.strftime('%Y-%m-%d %H:%M:%S')} ----\n{detail}")
+        except Exception:
+            pass
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"{APP_NAME} failed to start.\n\nSee:\n"
+                f"{os.path.join(LOG_DIR, 'crash.log')}\n\n{detail[-800:]}",
+                f"{APP_NAME} startup error",
+                0x10,
+            )
+        except Exception:
+            pass
+        raise
     if "--autoconnect" in sys.argv or "--autolive" in sys.argv:
         app.after(700, app.on_connect)
     if "--autolive" in sys.argv:

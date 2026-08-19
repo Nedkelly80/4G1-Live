@@ -8,7 +8,7 @@ upload. Nothing is transmitted off the computer by the application.
 
 WHAT IS WRITTEN TO DISK
 
-4G1 Live automatically records telemetry. When a live or demo session starts,
+4G1 Live automatically records telemetry. When a live session starts,
 every captured sample is written to a CSV file as it is read, so that a crash or
 power loss cannot lose a session:
 

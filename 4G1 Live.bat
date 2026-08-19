@@ -1,25 +1,41 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
 
-rem 4G1 Live must run on 32-bit Python: the J2534 adapter driver is 32-bit.
-rem Prefer the Python launcher, then fall back to a per-user 3.13 install.
+rem ============================================================
+rem  4G1 Live AI launcher  (32-bit Python required for J2534)
+rem  Uses launch.ps1 so failures are not silent under pythonw.
+rem ============================================================
 
-where pyw >nul 2>&1
-if %errorlevel%==0 (
-    start "" pyw -3-32 app.py
-    exit /b
+set "LOGDIR=%LOCALAPPDATA%\4G1 Live AI\Logs"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+
+rem Optional secrets (app also loads these itself)
+set "SECRETS=%LOCALAPPDATA%\4G1 Live AI\secrets.env"
+if exist "%SECRETS%" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%SECRETS%") do (
+    if not "%%A"=="" if not "%%B"=="" set "%%A=%%B"
+  )
 )
 
-set "PYW=%LOCALAPPDATA%\Programs\Python\Python313-32\pythonw.exe"
-if exist "%PYW%" (
-    start "" "%PYW%" app.py
-    exit /b
+if not exist "%~dp0app.py" (
+  echo [%date% %time%] Missing app.py >> "%LOGDIR%\launch-crash.log"
+  echo Missing app.py in %~dp0
+  pause
+  exit /b 1
 )
 
-echo.
-echo 32-bit Python 3 was not found.
-echo 4G1 Live requires 32-bit Python because the J2534 adapter driver is 32-bit.
-echo Install it from python.org, choosing the 32-bit ("x86") installer.
-echo.
-pause
+if not exist "%~dp0launch.ps1" (
+  echo [%date% %time%] Missing launch.ps1 >> "%LOGDIR%\launch-crash.log"
+  echo Missing launch.ps1 — reinstall from the 4G1-Live-AI folder.
+  pause
+  exit /b 1
+)
+
+rem -WindowStyle Hidden keeps the flash of PowerShell brief; errors still MessageBox
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0launch.ps1"
+set "EC=%ERRORLEVEL%"
+if not "%EC%"=="0" (
+  echo [%date% %time%] launch.ps1 exit %EC% >> "%LOGDIR%\launch-crash.log"
+)
+exit /b %EC%

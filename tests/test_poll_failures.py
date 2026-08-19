@@ -78,7 +78,6 @@ class PollLoopHarness:
         self.latest = {}
         self.samples = []
         self.live = True
-        self.demo = False
         self.logged = []
         self.faults = []
         self.autosaved = 0

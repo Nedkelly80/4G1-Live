@@ -48,7 +48,6 @@ before sale.
 ## Features
 
 - **Dashboard** — live gauges (Digital / Bar / Dial), RPM trend chart, telemetry log + CSV export
-- **Explore Demo** — realistic simulated data for training and sales demonstrations, clearly isolated from vehicle communication
 - **Sensor health LEDs** — green / amber / red on each supported gauge from AU CE / Mirage MFI FSM bands
 - **Codes** — read / clear classic Mitsubishi 2-digit DTCs
 - **Settings** — themes, gauge style, poll rate, vehicle profile, per-parameter show/hide with scaling + health notes

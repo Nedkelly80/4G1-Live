@@ -1,0 +1,34 @@
+4G1 Live AI — quick setup (Windows XP look + Grok)
+==================================================
+
+START MENU / DESKTOP
+--------------------
+Already installed as "4G1 Live AI" with the AI badge icon.
+
+Reinstall shortcuts anytime:
+  powershell -ExecutionPolicy Bypass -File install-start-menu.ps1
+
+Or double-click:  4G1 Live.bat
+Or Desktop / Start Menu:  4G1 Live AI
+
+1. Open Start and search:  4G1 Live AI
+
+2. You should see the classic blue/gray Windows XP Luna look + AI badge icon.
+
+3. Settings → AI ASSISTANT
+   - Your name: Simon
+   - XAI API key: paste from https://console.x.ai  (API Keys)
+   - Management key: paste if you want Upload Manual
+     (console.x.ai → Management Keys → Collections permissions)
+   - Click Apply Settings
+
+4. AI Assistant tab
+   - Type a question and press Send (or Enter)
+   - Or hold F9 to talk
+   - Upload Manual… for FSM PDFs
+
+5. Keys are stored only in:
+   %LOCALAPPDATA%\4G1 Live AI\secrets.env
+   (not in settings.json, not in the installer)
+
+Theme: Windows XP is the default. Other themes still available under Settings.

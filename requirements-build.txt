@@ -1,1 +1,6 @@
 pyinstaller==6.16.0
+openai>=1.60.0
+pywin32>=306
+pyttsx3>=2.90
+SpeechRecognition>=3.10.0
+PyAudio>=0.2.14
