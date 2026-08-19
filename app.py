@@ -105,7 +105,14 @@ THEMES = {
     "Windows XP": dict(
         # Exact colouring from the Edge 4G1 Live HTML mockup
         # (Windows XP Luna — grey edition). Gauges are mini XP windows.
-        bg="#3A6EA5",                 # Luna desktop / workspace blue
+        bg="#3A6EA5",                 # Luna DESKTOP blue - the wallpaper behind
+                                      # the window, NOT the window's own body
+        # The window body. In Luna the application window is light grey and the
+        # blue only ever appears as the desktop behind it and in caption bars.
+        # Painting the content area blue (which is what happened when this
+        # theme used `bg` for the workspace frames) inverts the whole look and
+        # is the single thing that made it read wrong against the HTML mockup.
+        workspace="#F4F4F4",
         panel="#F4F4F4",              # mockup body grey
         panel2="#FFFFFF",             # white fields / selected tab face
         elev="#EFEFEF",               # toolbar / button face
@@ -232,6 +239,18 @@ def _best_available_font(root, candidates, fallback):
             return _FONT_CACHE[key]
     _FONT_CACHE[key] = fallback
     return fallback
+
+
+def workspace_bg(theme):
+    """Background for content areas — the window's own body, not the desktop.
+
+    On Windows XP these are two different colours: the Luna desktop is blue
+    (`bg`) but the application window body is light grey (`workspace`). Every
+    other theme is a single flat surface, so `workspace` falls back to `bg` and
+    nothing changes for them.
+    """
+    t = theme or {}
+    return t.get("workspace", t.get("bg", "#000000"))
 
 
 def ui_font(theme, size, bold=False, mono=False):
@@ -1168,7 +1187,7 @@ def card(parent, theme, accent=None, title=None):
     On Windows XP theme: nested Luna window matching the Edge mockup.
     """
     t = theme
-    outer = tk.Frame(parent, bg=t["bg"])
+    outer = tk.Frame(parent, bg=workspace_bg(t))
     if t.get("xp"):
         frame = tk.Frame(
             outer, bg=t["panel"],
@@ -1191,8 +1210,8 @@ def card(parent, theme, accent=None, title=None):
 
 # ---------------------------------------------------------------- section header
 def section_label(parent, text, theme):
-    f = tk.Frame(parent, bg=theme["bg"])
-    tk.Label(f, text=text, bg=theme["bg"], fg=theme["dim"],
+    f = tk.Frame(parent, bg=workspace_bg(theme))
+    tk.Label(f, text=text, bg=workspace_bg(theme), fg=theme["dim"],
              font=ui_font(theme, 8, bold=True)).pack(side="left")
     tk.Frame(f, bg=theme["border"], height=1).pack(side="left", fill="x", expand=True,
                                                     padx=(10, 0), pady=1)
@@ -1212,7 +1231,7 @@ class App(tk.Tk):
         self._resolve_theme_fonts()
         prof = j2534.get_profile(self.settings.get("vehicle_profile"))
         self.title(f"{APP_NAME}  —  {prof['short']}  ·  MUT-II")
-        self.configure(bg=self.theme["bg"])
+        self.configure(bg=workspace_bg(self.theme))
         # Fit common laptop screens (was 1180×940 — too tall for many displays)
         self.update_idletasks()
         try:
@@ -1464,13 +1483,13 @@ class App(tk.Tk):
         self._toolbar()
         self._tabbar()
 
-        self.body = tk.Frame(self, bg=t["bg"])
+        self.body = tk.Frame(self, bg=workspace_bg(t))
         self.body.pack(fill="both", expand=True, padx=10, pady=(0, 2))
 
-        self.tab_dash = tk.Frame(self.body, bg=t["bg"])
-        self.tab_codes = tk.Frame(self.body, bg=t["bg"])
-        self.tab_ai = tk.Frame(self.body, bg=t["bg"])
-        self.tab_settings = tk.Frame(self.body, bg=t["bg"])
+        self.tab_dash = tk.Frame(self.body, bg=workspace_bg(t))
+        self.tab_codes = tk.Frame(self.body, bg=workspace_bg(t))
+        self.tab_ai = tk.Frame(self.body, bg=workspace_bg(t))
+        self.tab_settings = tk.Frame(self.body, bg=workspace_bg(t))
 
         self._build_dash()
         self._build_codes()
@@ -1606,9 +1625,57 @@ class App(tk.Tk):
         canvas.create_line(20, 22, 31, 10, fill=t["fg"], width=2, capstyle="round")
         canvas.create_oval(17, 19, 23, 25, fill=t["accent"], outline=t["fg"])
 
+    # Luna caption gradient — the exact stops from the HTML mockup's `.tbar`.
+    _CAPTION_STOPS = ("#3F8CF3", "#2A6CD4", "#1049B5", "#1E5BC8", "#1653B8")
+
+    def _xp_caption(self, parent, text, height=26):
+        """Draw the mockup's Luna title bar: gradient, gold icon, white title.
+
+        The HTML reference has no branding band — just this 26px caption, then
+        straight into the toolbar. All the state that used to live in a 72px
+        navy slab (profile / connection / adapter) moves to the status bar,
+        which is where the mockup keeps it.
+        """
+        cap = tk.Canvas(parent, height=height, highlightthickness=0, bd=0)
+        cap.pack(fill="x")
+
+        def _paint(_e=None):
+            cap.delete("all")
+            w = max(cap.winfo_width(), 8)
+            h = max(cap.winfo_height(), height)
+            stops = self._CAPTION_STOPS
+            n = len(stops) - 1
+            for y in range(h):
+                f = y / max(1, h - 1)
+                seg = min(n - 1, int(f * n))
+                cap.create_line(0, y, w, y,
+                                fill=_blend_hex(stops[seg], stops[seg + 1], f * n - seg))
+            # gold program icon (.ticon)
+            top = (h - 14) // 2
+            for i in range(14):
+                cap.create_line(9, top + i, 23, top + i,
+                                fill=_blend_hex("#FFD651", "#FF8B1F", i / 13.0))
+            cap.create_rectangle(9, top, 23, top + 14, outline="#DDE8FF")
+            fnt = ui_font(self.theme, 10, bold=True)
+            # 1px navy drop shadow, as in the mockup's text-shadow
+            cap.create_text(30, h // 2 + 1, text=text, anchor="w",
+                            fill="#0F1089", font=fnt)
+            cap.create_text(29, h // 2, text=text, anchor="w",
+                            fill="#FFFFFF", font=fnt)
+
+        cap.bind("<Configure>", _paint)
+        return cap
+
     def _header(self):
         t = self.theme
         xp = bool(t.get("xp"))
+        if xp:
+            # Match the HTML mockup exactly: thin Luna caption, nothing else.
+            # The vehicle / connection / adapter readouts are created by
+            # _footer() and live in the status bar.
+            self._xp_caption(self, f"{APP_NAME}  —  {self._active_profile()['short']}  ·  MUT-II")
+            tk.Frame(self, bg=t.get("border", "#0855DD"), height=1).pack(fill="x")
+            return
         # Luna title-bar chrome on Windows XP theme
         if xp:
             bar = t.get("title", "#0A246A")
@@ -1848,6 +1915,19 @@ class App(tk.Tk):
             self._fit_tries = 0
             self.after(120, self._autofit_dash)
 
+    def _xp_status_cell(self, parent, text, fg, mono=False, grow=False, width=None):
+        """One sunken `.cell` from the mockup's status bar."""
+        t = self.theme
+        cell = tk.Label(
+            parent, text=text, bg=t.get("elev", "#F0F0F0"), fg=fg,
+            font=ui_font(t, 7, mono=mono), anchor="w", padx=8, pady=2,
+            bd=1, relief="sunken",
+        )
+        if width:
+            cell.configure(width=width)
+        cell.pack(side="left", fill="x", expand=bool(grow), padx=(0, 4))
+        return cell
+
     def _footer(self):
         t = self.theme
         foot_bg = t.get("elev", t["panel"]) if t.get("xp") else t["panel"]
@@ -1859,6 +1939,25 @@ class App(tk.Tk):
         else:
             tk.Frame(foot, bg=t["border"], height=1).pack(fill="x")
         inner = tk.Frame(foot, bg=foot_bg)
+
+        if t.get("xp"):
+            # The mockup's status bar: sunken cells carrying the state that the
+            # old 72px branding band used to show. status_pill / dev_info /
+            # vehicle_lbl keep their names because the live-data handlers drive
+            # them by attribute; only where they are drawn has changed.
+            inner.pack(fill="x", padx=4, pady=3)
+            self.status_pill = self._xp_status_cell(
+                inner, "disconnected", t.get("muted", "#555555"), width=22)
+            self.vehicle_lbl = self._xp_status_cell(
+                inner, self._active_profile()["short"], t["fg"], width=14)
+            self.dev_info = self._xp_status_cell(
+                inner, "ECU: —", t["fg"], mono=True, width=26)
+            self.foot_right = self._xp_status_cell(
+                inner, "Ready", t.get("muted", "#555555"), mono=True, width=30)
+            self.foot_left = self._xp_status_cell(
+                inner, self._conn_summary(), t.get("muted", "#555555"), grow=True)
+            return
+
         inner.pack(fill="x", padx=10, pady=4)
         self.foot_left = tk.Label(inner, text=self._conn_summary(),
                                   bg=foot_bg, fg=t["muted"], font=ui_font(t, 7))
@@ -1879,7 +1978,7 @@ class App(tk.Tk):
 
     def _show_about(self):
         t = self.theme
-        win = tk.Toplevel(self, bg=t["bg"])
+        win = tk.Toplevel(self, bg=workspace_bg(t))
         win.title(f"About {APP_NAME}")
         win.resizable(False, False)
         win.transient(self)
@@ -1976,7 +2075,7 @@ class App(tk.Tk):
         voice_hint = "Hold F9 to ask a question" if self.voice is not None else \
             "Voice unavailable on this machine"
         self.voice_status_lbl = tk.Label(
-            self.tab_dash, text=voice_hint, bg=t["bg"], fg=t["muted"],
+            self.tab_dash, text=voice_hint, bg=workspace_bg(t), fg=t["muted"],
             font=ui_font(t, 9), anchor="w",
         )
         self.voice_status_lbl.pack(fill="x", pady=(0, 4))
@@ -2005,7 +2104,7 @@ class App(tk.Tk):
         )
         self.logbox.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
-        lower = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(105))
+        lower = tk.Frame(self.tab_dash, bg=workspace_bg(t), height=self._scaled_px(105))
         lower.pack(side="bottom", fill="x", pady=(0, 6))
         lower.pack_propagate(False)
         self.chart_load = StripChart(lower, t, "Engine Load", "%",
@@ -2028,7 +2127,7 @@ class App(tk.Tk):
                                  font=ui_font(t, 10, mono=True))
         self.sess_lbl.pack(side="left", expand=True)
 
-        primary = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(248))
+        primary = tk.Frame(self.tab_dash, bg=workspace_bg(t), height=self._scaled_px(248))
         primary.pack(fill="x", pady=(8, 6))
         primary.pack_propagate(False)
         self._dash_primary = primary
@@ -2051,7 +2150,7 @@ class App(tk.Tk):
                                     _param(0x21)[3], accent=t["accent"])
         self.chart_rpm.pack(side="left", fill="both", expand=True)
 
-        critical = tk.Frame(primary, bg=t["bg"])
+        critical = tk.Frame(primary, bg=workspace_bg(t))
         critical.pack(side="left", fill="both", expand=True)
         for i, pid in enumerate([0x06, 0x07, 0x3A, 0x17, 0x14, 0x2F]):
             if pid not in j2534.ALL_PARAMS:
@@ -2065,7 +2164,7 @@ class App(tk.Tk):
         for r in range(2):
             critical.grid_rowconfigure(r, weight=1, uniform="critical")
 
-        self.grid_frame = tk.Frame(self.tab_dash, bg=t["bg"], height=self._scaled_px(108))
+        self.grid_frame = tk.Frame(self.tab_dash, bg=workspace_bg(t), height=self._scaled_px(108))
         self.grid_frame.pack(fill="x", pady=(0, 6))
         self.grid_frame.pack_propagate(False)
         self._build_gauges()
@@ -2114,7 +2213,7 @@ class App(tk.Tk):
     # ---------- codes ----------
     def _build_codes(self):
         t = self.theme
-        wrap = tk.Frame(self.tab_codes, bg=t["bg"])
+        wrap = tk.Frame(self.tab_codes, bg=workspace_bg(t))
         wrap.pack(fill="both", expand=True, pady=10)
 
         codes_outer, codes_card = card(wrap, t)
@@ -2178,7 +2277,7 @@ class App(tk.Tk):
     # ---------- AI assistant (personal edition) ----------
     def _build_ai(self):
         t = self.theme
-        wrap = tk.Frame(self.tab_ai, bg=t["bg"])
+        wrap = tk.Frame(self.tab_ai, bg=workspace_bg(t))
         wrap.pack(fill="both", expand=True, pady=10)
 
         outer, panel = card(wrap, t, accent=t.get("accent2"))
@@ -2857,9 +2956,9 @@ class App(tk.Tk):
     def _build_settings(self):
         t = self.theme
         # scrollable canvas so connection + gauges fit
-        canvas = tk.Canvas(self.tab_settings, bg=t["bg"], highlightthickness=0)
+        canvas = tk.Canvas(self.tab_settings, bg=workspace_bg(t), highlightthickness=0)
         scroll = ttk.Scrollbar(self.tab_settings, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas, bg=t["bg"])
+        inner = tk.Frame(canvas, bg=workspace_bg(t))
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         inner_window = canvas.create_window((0, 0), window=inner, anchor="nw")
         canvas.bind("<Configure>",
@@ -2883,7 +2982,7 @@ class App(tk.Tk):
         self._settings_canvas = canvas
 
         # ---- logo preview + vehicle ----
-        top = tk.Frame(inner, bg=t["bg"])
+        top = tk.Frame(inner, bg=workspace_bg(t))
         top.pack(fill="x", pady=(10, 0), padx=2)
 
         brand = tk.Frame(top, bg=t["panel"], highlightbackground=t["border"],
@@ -3363,7 +3462,7 @@ class App(tk.Tk):
         SoftButton(ai_know_row, "Upload Manual…", self._upload_manual, t,
                    primary=False).pack(side="left", padx=12)
 
-        act = tk.Frame(inner, bg=t["bg"])
+        act = tk.Frame(inner, bg=workspace_bg(t))
         act.pack(fill="x", pady=12, padx=2)
         SoftButton(act, "Apply Settings", self.apply_settings, t, primary=True).pack(side="left")
         SoftButton(act, "Reset Connection Defaults", self._reset_conn_defaults, t,
@@ -3505,7 +3604,7 @@ class App(tk.Tk):
         existing = getattr(self, "_tactrix_review_window", None)
         if existing is not None and existing.winfo_exists():
             existing.destroy()
-        win = tk.Toplevel(self, bg=t["bg"])
+        win = tk.Toplevel(self, bg=workspace_bg(t))
         self._tactrix_review_window = win
         win.title("4G1 Live AI — Tactrix Log")
         win.transient(self)
@@ -3735,7 +3834,7 @@ class App(tk.Tk):
     def rebuild_ui(self):
         for w in self.winfo_children():
             w.destroy()
-        self.configure(bg=self.theme["bg"])
+        self.configure(bg=workspace_bg(self.theme))
         prof = self._active_profile()
         self.title(f"{APP_NAME}  —  {prof['short']}  ·  MUT-II")
         self.gauges = {}
@@ -3770,8 +3869,18 @@ class App(tk.Tk):
             "warn": (bar, warn, f"●  {text}"),
         }
         if t.get("xp"):
-            bg, fg, label = styles.get(mode, styles["off"])
-            self.status_pill.config(text=label, bg=bg, fg=fg)
+            # The status readout is a sunken status-bar cell now, not a pill on
+            # a navy header, so it keeps the light cell background and uses the
+            # mockup's own .cell colours (live green / error red / amber).
+            cell_bg = t.get("elev", "#F0F0F0")
+            xp_cells = {
+                "off":  (t.get("muted", "#555555"), "disconnected"),
+                "ok":   ("#0A7B26", f"● {text.lower()}"),
+                "live": ("#0A7B26", f"● {text.lower()}"),
+                "warn": ("#B07000", f"● {text.lower()}"),
+            }
+            fg, label = xp_cells.get(mode, xp_cells["off"])
+            self.status_pill.config(text=label, bg=cell_bg, fg=fg)
             return
 
         non_xp = {
@@ -3795,9 +3904,16 @@ class App(tk.Tk):
                 phase = (getattr(self, "_status_phase", 0) + 1) % 10
                 self._status_phase = phase
                 pulse = 0.25 if phase < 5 else 0.05
-                self.status_pill.config(
-                    fg=_blend_hex(t["accent_hi"], t.get("brand2", t["accent"]), pulse)
-                )
+                if t.get("xp"):
+                    # Light status-bar cell: pulse within readable greens
+                    # rather than the bright-on-navy header colours.
+                    self.status_pill.config(
+                        fg=_blend_hex("#0A7B26", "#12B53C", pulse * 3)
+                    )
+                else:
+                    self.status_pill.config(
+                        fg=_blend_hex(t["accent_hi"], t.get("brand2", t["accent"]), pulse)
+                    )
         except Exception:
             pass
         self._stale_data_watchdog()
@@ -3853,7 +3969,10 @@ class App(tk.Tk):
             fw, dl, ap = self.dev.version()
             mv = self.dev.battery_mv() or 0
             self._set_status("CONNECTED", "ok")
-            self.dev_info.config(text=f"fw {fw}   ·   {mv / 1000:.1f} V")
+            ecu_txt = f"fw {fw}   ·   {mv / 1000:.1f} V"
+            if self.theme.get("xp"):
+                ecu_txt = f"ECU: {ecu_txt}"
+            self.dev_info.config(text=ecu_txt)
             self.connect_btn.config(text="Disconnect", state="normal")
             self.live_btn.config(state="normal")
             self.foot_right.config(text=f"Adapter ready  ·  {mv / 1000:.2f} V")
@@ -3880,7 +3999,7 @@ class App(tk.Tk):
             self.dev = None
         self.connect_btn.config(text="Connect", state="normal")
         self.live_btn.config(text="Start Live Data", state="disabled")
-        self.dev_info.config(text="—")
+        self.dev_info.config(text="ECU: —" if self.theme.get("xp") else "—")
         self._set_status("OFFLINE", "off")
         self.foot_right.config(text="Adapter disconnected  ·  Ready")
         self.log_line("Adapter disconnected")
