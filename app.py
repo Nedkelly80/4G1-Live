@@ -24,6 +24,7 @@ from tkinter import ttk, messagebox, filedialog
 
 import j2534
 import sweep
+import tactrix_review
 from product import APP_NAME, VERSION, COPYRIGHT, PRODUCT_DESCRIPTION
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +45,7 @@ else:
 
 LOG_DIR = os.path.join(USER_DATA_DIR, "Logs")
 SESSION_DIR = os.path.join(USER_DATA_DIR, "Sessions")
+TACTRIX_SESSION_DIR = os.path.join(USER_DATA_DIR, "Tactrix Sessions")
 SETTINGS_PATH = os.path.join(USER_DATA_DIR, "settings.json")
 LEGACY_SETTINGS_PATH = os.path.join(SOURCE_DIR, "settings.json")
 ICON_PATH = os.path.join(APP_DIR, "4g1.ico")          # window / taskbar (.ico)
@@ -391,6 +393,65 @@ class StatusLED(tk.Canvas):
         )
 
 
+# ---------------------------------------------------------------- xp caption bar
+class XPGaugeTitle(tk.Canvas):
+    """Luna-style gradient caption that turns a gauge into an XP 'window'.
+
+    Only used by the Windows XP theme. Draws a vertical blue gradient with the
+    gauge name (white, left) and its request id (light blue, right); optionally
+    carries the sensor-health LED so it reads like a real title bar.
+    """
+
+    # Vertical gradient stops matching the classic Luna caption.
+    _STOPS = ("#3F8CF3", "#2A6CD4", "#1049B5", "#1E5BC8", "#1653B8")
+
+    def __init__(self, master, title, reqid, theme, health=False, height=20, **kw):
+        super().__init__(master, height=height, highlightthickness=0, bd=0, **kw)
+        self.theme = theme
+        self._title = title
+        self._reqid = reqid
+        self._health = health
+        self._status = None
+        self._h = height
+        self.bind("<Configure>", lambda _e: self._paint())
+
+    def set_status(self, status):
+        # Only repaints when the health state actually changes, so the gradient
+        # is not redrawn on every telemetry frame.
+        if not self._health or status == self._status:
+            return
+        self._status = status
+        self._paint()
+
+    def _paint(self):
+        self.delete("all")
+        w = max(self.winfo_width(), 8)
+        h = max(self.winfo_height(), self._h)
+        stops = self._STOPS
+        n = len(stops) - 1
+        for y in range(h):
+            f = y / max(1, h - 1)
+            seg = min(n - 1, int(f * n))
+            col = _blend_hex(stops[seg], stops[seg + 1], f * n - seg)
+            self.create_line(0, y, w, y, fill=col)
+        fnt = ui_font(self.theme, 8, bold=True)
+        self.create_text(8, h // 2 + 1, text=self._title, anchor="w",
+                         fill="#0A2464", font=fnt)          # drop shadow
+        self.create_text(7, h // 2, text=self._title, anchor="w",
+                         fill="#FFFFFF", font=fnt)
+        rx = w - 5
+        if self._health:
+            cols = _health_colours(self.theme)
+            fill = cols.get(self._status, cols["off"])
+            r, cy = 4, h // 2
+            self.create_oval(rx - 2 * r, cy - r, rx, cy + r,
+                             fill=fill, outline="#0A2464")
+            rx -= (2 * r + 7)
+        if self._reqid:
+            self.create_text(rx, h // 2, text=self._reqid, anchor="e",
+                             fill="#DCEAFF", font=ui_font(self.theme, 7))
+
+
 # ---------------------------------------------------------------- hero vital tile
 class HeroTile(tk.Frame):
     """Large KPI tile for the top vitals strip."""
@@ -406,22 +467,32 @@ class HeroTile(tk.Frame):
         self._target = None
         self._health = None
         self.history = collections.deque(maxlen=24)
-        self.configure(highlightbackground=theme["border"], highlightthickness=1)
-        self.strip = tk.Frame(self, bg=theme["border"], height=2)
-        self.strip.pack(fill="x")
-
-        body = tk.Frame(self, bg=theme["panel"])
-        body.pack(fill="both", expand=True, padx=12, pady=(6, 8))
-
-        title_row = tk.Frame(body, bg=theme["panel"])
-        title_row.pack(fill="x")
-        tk.Label(title_row, text=name.upper(), bg=theme["panel"], fg=theme["dim"],
-                 font=ui_font(theme, 8, bold=True), anchor="w").pack(side="left")
-        if pid in j2534.HEALTH_PIDS:
-            self.led = StatusLED(title_row, theme, size=9)
-            self.led.pack(side="right", padx=(4, 0))
+        xp = bool(theme.get("xp"))
+        health = pid in j2534.HEALTH_PIDS
+        frame_border = theme.get("title", "#0A246A") if xp else theme["border"]
+        self.configure(highlightbackground=frame_border, highlightthickness=1)
+        if xp:
+            # XP 'window' caption owns the name + request id; beige body below.
+            self.strip = XPGaugeTitle(
+                self, name.upper(), f"0x{pid:02X}", theme, health=health)
+            self.strip.pack(fill="x")
+            self.led = self.strip if health else None
+            body = tk.Frame(self, bg=theme["panel"])
+            body.pack(fill="both", expand=True, padx=10, pady=(5, 8))
         else:
-            self.led = None
+            self.strip = tk.Frame(self, bg=theme["border"], height=2)
+            self.strip.pack(fill="x")
+            body = tk.Frame(self, bg=theme["panel"])
+            body.pack(fill="both", expand=True, padx=12, pady=(6, 8))
+            title_row = tk.Frame(body, bg=theme["panel"])
+            title_row.pack(fill="x")
+            tk.Label(title_row, text=name.upper(), bg=theme["panel"], fg=theme["dim"],
+                     font=ui_font(theme, 8, bold=True), anchor="w").pack(side="left")
+            if health:
+                self.led = StatusLED(title_row, theme, size=9)
+                self.led.pack(side="right", padx=(4, 0))
+            else:
+                self.led = None
 
         row = tk.Frame(body, bg=theme["panel"])
         row.pack(fill="x", pady=(0, 0))
@@ -485,7 +556,8 @@ class HeroTile(tk.Frame):
             bar_col = t["warn"]
         c.create_rectangle(0, 0, w, 3, fill=t["elev"], outline="")
         c.create_rectangle(0, 0, max(2, int(w * frac)), 3, fill=bar_col, outline="")
-        self.strip.config(bg=bar_col)
+        if not t.get("xp"):
+            self.strip.config(bg=bar_col)
 
 
 # ---------------------------------------------------------------- gauge widget
@@ -508,24 +580,37 @@ class Gauge(tk.Frame):
 
     def _build(self):
         t = self.theme
-        self.strip = tk.Frame(self, bg=t["border"], height=2)
-        self.strip.pack(fill="x")
-        body = tk.Frame(self, bg=t["panel"])
-        body.pack(side="left", fill="both", expand=True)
-        self.body = body
-
-        head = tk.Frame(body, bg=t["panel"])
-        head.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Label(head, text=self.name.upper(), bg=t["panel"], fg=t["dim"],
-                 font=ui_font(t, 8, bold=True), anchor="w").pack(side="left")
-        if self.pid in j2534.HEALTH_PIDS:
-            self.led = StatusLED(head, t, size=9)
-            self.led.pack(side="right", padx=(6, 0))
+        health = self.pid in j2534.HEALTH_PIDS
+        if t.get("xp"):
+            # XP 'window' chrome: gradient caption + beige body + thin blue frame.
+            self.configure(highlightbackground=t.get("title", "#0A246A"),
+                           highlightthickness=1)
+            self.strip = XPGaugeTitle(
+                self, self.name.upper(), f"0x{self.pid:02X}", t, health=health)
+            self.strip.pack(fill="x")
+            body = tk.Frame(self, bg=t["panel"])
+            body.pack(side="top", fill="both", expand=True)
+            self.body = body
+            self.led = self.strip if health else None
         else:
-            self.led = None
-        unit_text = "" if self.units == "state" else self.units
-        tk.Label(head, text=unit_text, bg=t["panel"], fg=t["muted"],
-                 font=ui_font(t, 7), anchor="e").pack(side="right")
+            self.strip = tk.Frame(self, bg=t["border"], height=2)
+            self.strip.pack(fill="x")
+            body = tk.Frame(self, bg=t["panel"])
+            body.pack(side="left", fill="both", expand=True)
+            self.body = body
+
+            head = tk.Frame(body, bg=t["panel"])
+            head.pack(fill="x", padx=12, pady=(8, 0))
+            tk.Label(head, text=self.name.upper(), bg=t["panel"], fg=t["dim"],
+                     font=ui_font(t, 8, bold=True), anchor="w").pack(side="left")
+            if health:
+                self.led = StatusLED(head, t, size=9)
+                self.led.pack(side="right", padx=(6, 0))
+            else:
+                self.led = None
+            unit_text = "" if self.units == "state" else self.units
+            tk.Label(head, text=unit_text, bg=t["panel"], fg=t["muted"],
+                     font=ui_font(t, 7), anchor="e").pack(side="right")
 
         if self.style == "Digital":
             self.val = tk.Label(body, text="—", bg=t["panel"], fg=t["muted"],
@@ -624,7 +709,8 @@ class Gauge(tk.Frame):
         frac = self._frac(value)
         col = self._colour(value, frac)
         txt = self._fmt(value)
-        self.strip.config(bg=col if col != t["fg"] else t["accent"])
+        if not t.get("xp"):
+            self.strip.config(bg=col if col != t["fg"] else t["accent"])
 
         if self.led is not None:
             self.led.set_status(self._health)
@@ -1440,6 +1526,11 @@ class App(tk.Tk):
                         font=ui_font(t, 8, bold=True), cursor="hand2", pady=4)
         save.pack(side="right", padx=8, pady=4)
         save.bind("<Button-1>", lambda e: self.save_csv())
+        review = tk.Label(bar, text="  Review Latest Tactrix Log  ",
+                          bg=t["panel2"], fg=t["fg"], font=ui_font(t, 8, bold=True),
+                          cursor="hand2", pady=4)
+        review.pack(side="right", padx=(0, 8), pady=4)
+        review.bind("<Button-1>", lambda e: self.review_latest_tactrix_log())
         clr = tk.Label(bar, text="  Clear  ", bg=t["elev"], fg=t["dim"],
                        font=ui_font(t, 8, bold=True), cursor="hand2", pady=4)
         clr.pack(side="right", pady=4)
@@ -1588,10 +1679,13 @@ class App(tk.Tk):
         self.codes_box.insert("end", "Connect to the ECU, then press Read Codes.\n\n")
         self.codes_box.insert(
             "end",
-            "Note: fault-code support varies by ECU. Codes are read from\n"
-            "requests 0x38/0x39, which on some MUT-II ECUs carry live data\n"
-            "instead. Treat an empty result as inconclusive, not as proof\n"
-            "the vehicle is fault-free.\n\n")
+            "Codes are read from the ECU's fault registers: 0x36 active\n"
+            "fault count, with 0x47/0x48 as the active fault bitmask.\n"
+            "(Corrected 18/8/26 — this previously read 0x38/0x39, which are\n"
+            "pressure channels, not fault registers.)\n\n"
+            "The COUNT is reliable. The bit-to-code mapping is not yet\n"
+            "verified on this ECU, so individual code names are provisional\n"
+            "until confirmed against a deliberately induced fault.\n\n")
         self.codes_box.insert("end", "Examples:\n")
         self.codes_box.insert("end", "  #11  Oxygen sensor\n")
         self.codes_box.insert("end", "  #21  Engine coolant temperature sensor\n")
@@ -2646,6 +2740,104 @@ class App(tk.Tk):
                 w.writerow(s)
         messagebox.showinfo("4G1 Live", f"Saved {len(self.samples)} rows to\n{path}")
 
+    def review_latest_tactrix_log(self):
+        """Open the newest numbered card log, or let the user select a CSV."""
+        try:
+            card_root = tactrix_review.discover_tactrix_root()
+            review = tactrix_review.analyse_tactrix_log(
+                tactrix_review.find_latest_numbered_log(card_root)
+            )
+        except (tactrix_review.TactrixLogError, OSError):
+            self._choose_tactrix_csv()
+            return
+        self._show_tactrix_review(review)
+
+    def _choose_tactrix_csv(self):
+        """Select and review one CSV without opening another application window."""
+        path = filedialog.askopenfilename(
+            title="Choose Tactrix Log CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            self._show_tactrix_review(tactrix_review.analyse_tactrix_log(path))
+        except (tactrix_review.TactrixLogError, OSError) as exc:
+            messagebox.showerror("4G1 Live — Tactrix Review", str(exc))
+
+    def _show_tactrix_review(self, review):
+        """Present an offline Tactrix capture in the active application theme."""
+        t = self.theme
+        existing = getattr(self, "_tactrix_review_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+
+        win = tk.Toplevel(self, bg=t["bg"])
+        self._tactrix_review_window = win
+        win.title("4G1 Live — Tactrix Log Review")
+        win.transient(self)
+        win.geometry("760x630")
+        win.minsize(620, 480)
+        try:
+            win.iconbitmap(ICON_PATH)
+        except Exception:
+            pass
+        panel_outer, panel = card(win, t)
+        panel_outer.pack(fill="both", expand=True, padx=14, pady=14)
+        tk.Label(panel, text="TACTRIX SD LOG REVIEW", bg=t["panel"], fg=t["fg"],
+                 font=ui_font(t, 12, bold=True)).pack(anchor="w", padx=16, pady=(14, 4))
+        tk.Label(panel, text="Offline capture review — not an engine-health verdict.",
+                 bg=t["panel"], fg=t["dim"], font=ui_font(t, 8)).pack(
+                     anchor="w", padx=16, pady=(0, 10)
+                 )
+        text = tk.Text(panel, bg=t["chart"], fg=t["accent2"], relief="flat",
+                       font=ui_font(t, 9, mono=True), wrap="word", padx=12, pady=10,
+                       insertbackground=t["fg"], selectbackground=t["panel2"])
+        text.insert("1.0", tactrix_review.format_review_text(review))
+        text.configure(state="disabled")
+        text.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        controls = tk.Frame(panel, bg=t["panel"])
+        controls.pack(fill="x", padx=16, pady=(0, 8))
+        tk.Label(controls, text="Session label", bg=t["panel"], fg=t["dim"],
+                 font=ui_font(t, 8, bold=True)).pack(side="left", padx=(0, 8))
+        session_var = tk.StringVar(value="Test")
+        ttk.Combobox(
+            controls, textvariable=session_var, state="readonly",
+            values=("Practice", "Heat 1", "Heat 2", "Heat 3", "Heat 4", "Final", "Test"),
+            width=14,
+        ).pack(side="left")
+        status_label = tk.Label(
+            panel, text=f"Archive copies: {TACTRIX_SESSION_DIR}", bg=t["panel"], fg=t["muted"],
+            font=ui_font(t, 7, mono=True), anchor="w", wraplength=700,
+        )
+        status_label.pack(fill="x", padx=16, pady=(0, 10))
+        actions = tk.Frame(panel, bg=t["panel"])
+        actions.pack(fill="x", padx=16, pady=(0, 14))
+        SoftButton(
+            actions, "Save Session Copy",
+            lambda: self._archive_tactrix_review(review, session_var, status_label), t,
+            primary=True,
+        ).pack(side="left")
+        SoftButton(
+            actions, "Open Another CSV",
+            lambda: (win.destroy(), self._choose_tactrix_csv()), t,
+        ).pack(side="left", padx=8)
+        SoftButton(actions, "Close", win.destroy, t).pack(side="right")
+        win.bind("<Escape>", lambda _event: win.destroy())
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+
+    def _archive_tactrix_review(self, review, session_var, status_label):
+        """Save a labelled PC copy while leaving the standalone card untouched."""
+        try:
+            archived = tactrix_review.archive_session_copy(
+                review.source_path, TACTRIX_SESSION_DIR, session_var.get()
+            )
+        except (tactrix_review.TactrixLogError, OSError) as exc:
+            status_label.configure(text=f"Archive not saved: {exc}", fg=self.theme["bad"])
+            return
+        status_label.configure(text=f"Saved copy: {archived}", fg=self.theme["good"])
+
     # ---------- codes ----------
     def _mut_session_start(self):
         """Open a MUT-II channel using current connection settings."""
@@ -2772,36 +2964,61 @@ class App(tk.Tk):
             if reconnect:
                 pin1 = self._mut_session_start()
             codes = self.dev.read_dtcs()
+            # Also dump every candidate fault register raw. Which request
+            # actually carries DTCs on this ECU is genuinely unknown (three
+            # sources disagree, and live ROM tracing contradicts two of them),
+            # so show the bytes and let the car settle it.
+            try:
+                cand = self.dev.read_dtc_candidates()
+            except Exception:
+                cand = None
             if reconnect:
                 self._mut_session_end(pin1)
         except Exception as e:
             self.codes_box.insert("end", f"Read failed: {e}\n(ignition on?)\n")
             return
+        if cand:
+            self.codes_box.insert("end", "Candidate fault registers (RAW):\n")
+            for req in sorted(cand):
+                v = cand[req]
+                shown = "no reply" if v is None else f"0x{int(v):02X}  ({int(v)})"
+                self.codes_box.insert("end", f"   request 0x{req:02X} = {shown}\n")
+            self.codes_box.insert(
+                "end",
+                "\nTO IDENTIFY THE REAL FAULT REGISTER: note these values with\n"
+                "the engine healthy, then unplug one sensor at idle and read\n"
+                "again. Whichever register CHANGES is the fault register on\n"
+                "this ECU. Nothing below is trustworthy until that is done.\n\n")
         if codes is None:
             self.codes_box.insert("end", "No response from ECU.\n")
             return
         if not codes:
-            # An empty fault mask is NOT proof of a healthy engine. DTC reads
-            # use requests 0x38/0x39, and on some MUT-II ECUs those addresses
-            # serve live data instead of a fault bitmask — on the CE 4G15 this
-            # was developed against, 0x38 returned a constant 0.0 for an entire
-            # running session. Never let this screen imply a clean bill of health.
+            # An empty result is NOT proof of a healthy engine. The registers
+            # are now correct (0x36 count, 0x47/0x48 mask), but the bit-to-code
+            # mapping is still unverified on this ECU family, so keep the
+            # wording honest and never imply a clean bill of health.
             self.codes_box.insert("end", "No trouble codes returned.\n\n")
             self.codes_box.insert(
                 "end",
                 "This is NOT confirmation that the engine is fault-free.\n\n"
-                "Fault codes are read from requests 0x38/0x39. On some MUT-II\n"
-                "ECUs those addresses carry live data rather than a fault mask,\n"
-                "so an empty result can mean either:\n"
-                "   - no faults are stored, or\n"
-                "   - this ECU does not report faults at those addresses.\n\n"
-                "Confirm with a factory-level scan tool before declaring a\n"
-                "vehicle fault-free. Use Sweep Requests to see what this ECU\n"
-                "actually serves.\n")
+                "Codes now come from the correct registers — 0x36 active fault\n"
+                "count, 0x47/0x48 active fault mask. An empty result means the\n"
+                "ECU reported a zero active-fault count, which is meaningful\n"
+                "but not conclusive:\n"
+                "   - stored (historic) faults live at 0x37 / 0x40-0x45 and\n"
+                "     are not read here yet, and\n"
+                "   - the bit-to-code mapping has not been confirmed on this\n"
+                "     ECU, so a set bit could go unnamed.\n\n"
+                "To validate this screen: unplug one sensor at idle and check\n"
+                "that the active-fault count goes non-zero.\n")
             return
         self.codes_box.insert("end", f"{len(codes)} code(s) present:\n\n")
         for code, desc in codes:
-            self.codes_box.insert("end", f"  #{code:02d}   {desc}\n")
+            # code is normally an int MUT code, but read_dtcs may also return a
+            # plain-text summary row (ECU reported N active faults with no
+            # matching bit), so format defensively rather than assuming int.
+            label = f"#{code:02d}" if isinstance(code, int) else str(code)
+            self.codes_box.insert("end", f"  {label}   {desc}\n")
 
     def clear_codes(self):
         if not self.dev:

@@ -205,14 +205,49 @@ class Device:
         return None
 
     # --- Diagnostic trouble codes ---
-    def read_dtcs(self, low_req=0x38, high_req=0x39):
-        """Return list of (code, description) for currently-set faults.
+    DTC_CANDIDATE_REQS = (0x3B, 0x3C, 0x3D, 0x36, 0x37, 0x47, 0x48, 0x71)
 
-        On many pre-/early-MUT ECUs, active DTCs are bitmasks at 0x38/0x39.
-        On later turbo ECUs those addresses are MDP/boost — if live data for
-        0x38 read a constant 0.0 live on this car (21/7/26), so DTC decode may
-        not apply to that ECU family.
+    def read_dtc_candidates(self, reqs=None):
+        """Read every candidate DTC register and return {req: raw_or_None}.
+
+        WHY THIS IS NOT A DECODER. As of 18/8/26 nobody can say which request
+        carries fault codes on THIS ECU, and three sources disagree:
+
+          * original code here   : 0x38/0x39  -- now known to be MAP/Boost and
+                                   an ADC channel. Definitely wrong.
+          * MUT_00.txt symbol list: 0x36/0x37/0x47/0x48/0x71. But live
+                                   disassembly of a real H8/539F ROM marks
+                                   ALL of 0x36, 0x37, 0x47 and 0x48 as BLANK
+                                   (untraced) -- no evidence they exist.
+          * EvoScan, decompiled  : 0x3B/0x3C/0x3D, three status bytes decoded
+                                   into the 14 classic MUT-II codes. But the
+                                   same tracing calls 0x3C "Oxygen Sensor #2,
+                                   CONFIRMED", which contradicts that too, and
+                                   EvoScan's own UI limits it to pre-1997 cars.
+
+        Guessing here is how the Codes tab got broken in the first place. So
+        this returns RAW BYTES ONLY and names nothing. Read them on a healthy
+        engine, then unplug one sensor and read again: whichever register
+        changes is the fault register on this ECU, and then it can be decoded
+        properly. That is a 30-second test and it ends the argument.
         """
+        out = {}
+        for req in (reqs or self.DTC_CANDIDATE_REQS):
+            try:
+                out[req] = self.mut2_request(req)
+            except Exception:
+                out[req] = None
+        return out
+
+    def read_dtcs(self, low_req=0x47, high_req=0x48, count_req=0x36):
+        """DEPRECATED / UNVERIFIED - prefer read_dtc_candidates().
+
+        Kept so existing callers do not break. The registers below come from
+        the MUT_00.txt symbol list, which live ROM tracing contradicts (all
+        four trace as BLANK). Do not present this output as fault codes
+        without confirming the register on the car first.
+        """
+        n_active = self.mut2_request(count_req)
         lo = self.mut2_request(low_req)
         hi = self.mut2_request(high_req)
         if lo is None and hi is None:
@@ -223,6 +258,16 @@ class Device:
         for code, bit, desc in DTC_TABLE:
             if bits & (1 << bit):
                 found.append((code, desc))
+        # The active-fault COUNT is more trustworthy than the bit mapping. If
+        # the ECU says it holds faults but no known bit matched, say so plainly
+        # rather than reporting a clean bill of health on an incomplete table.
+        if n_active:
+            unnamed = int(n_active) - len(found)
+            if unnamed > 0:
+                found.append((
+                    f"ECU reports {int(n_active)} active fault(s)",
+                    f"{unnamed} not matched to a known code - bit mapping unverified on this ECU",
+                ))
         return found
 
     def clear_dtcs(self, req=0xCA):
@@ -260,14 +305,28 @@ VEHICLE_PROFILES = {
         "engine": "4G15 SOHC 12V 1.5L",
         "protocol": "MUT-II K-line",
         "region": "AU metric",
-        "airflow": "Often MAP-based (check 0x1A if AFM fitted)",
+        "airflow": "Speed-density (MAP) — NO MAF/AFM fitted, confirmed against the AU 4G15 12V workshop manual",
         "boost": "N/A (NA)",
         "ecu_hint": "Metal or plastic CE ECU",
+        # Sensors this engine does NOT have. Kept explicit because their absence
+        # changes how you read the dashboard, not just what is displayed.
+        "knock_sensor": False,
+        "egr": False,
+        "absent_sensors": (
+            "No knock sensor — this ECU has ZERO detonation protection, so a lean "
+            "or over-advanced condition is never pulled back by timing retard. "
+            "No MAF/AFM — load is speed-density off MAP (0x1A) + rpm. "
+            "No EGR. Single narrowband O2. Ignition is distributor-based with the "
+            "crank-angle/TDC sensors inside the distributor."
+        ),
         "note_overrides": {
-            0x1A: "AFM only — this car is MAP-sensored, no AFM fitted",
-            0x15: "raw × 0.5 kPa  ·  sea level ~100–102",
-            0x3A: "NTC ADC → °C  ·  manifold IAT on many 4G15",
-            0x38: "unverified on this ECU — read flat 0.0 for an entire running session (21/7/26); real MAP request ID still unknown",
+            0x1A: "THIS IS THE MAP SENSOR on this car — corrected 18/8/26. The old note here said 'AFM only, ignore' and was exactly backwards. There is no MAF/AFM on this engine at all: load is speed-density from this channel plus rpm",
+            0x15: "raw × 0.5 kPa  ·  sea level ~100–102  ·  read an impossible 120 kPa running vs 100 key-on, so the SCALING is wrong — the request id is correct per the MUT table",
+            0x3A: "NTC ADC → °C  ·  manifold IAT on many 4G15  ·  NOT built into a MAF housing on this engine — there is no MAF",
+            0x38: "manifold DIFFERENTIAL pressure — expected to sit at 0.0 on this car (no EGR). Not the MAP sensor; use 0x1A",
+            0x26: "NO KNOCK SENSOR ON THIS ENGINE. Whatever this register reports is not detonation feedback. A reading of 0 does NOT mean the engine is not detonating — it means nothing is listening. Do not treat this channel as knock protection",
+            0x12: "EGR temperature — no EGR fitted to this engine, so this channel is not meaningful here",
+            0x07: "Warm operating 80–100 °C (thermostat opens 82 °C). NOTE: this car is KNOWN to run cold — Darwin logs showed 30–48 °C for a whole race. That is a real cooling/thermostat condition, not a sensor fault, and it keeps the ECU in warm-up enrichment all race",
         },
     },
     "4g93_maf": {
@@ -283,7 +342,7 @@ VEHICLE_PROFILES = {
         "boost": "N/A (NA)",
         "ecu_hint": "e.g. MD360479 plastic H8",
         "note_overrides": {
-            0x1A: "raw × 6.29 Hz  ·  Karman vortex MAF (stock 4G93)",
+            0x1A: "the MUT table calls 0x1A manifold absolute pressure. If a Karman-vortex AFM is actually fitted, the historic ×6.29 Hz reading applied here — the base table now shows this channel RAW, so apply whichever conversion the car proves out",
             0x15: "raw × 0.5 kPa  ·  baro often in MAF housing",
             0x3A: "NTC ADC → °C  ·  IAT often built into MAF",
             0x38: "MAP/boost scale — usually N/A on MAF NA 4G93",
@@ -379,8 +438,26 @@ ALL_PARAMS = {
     0x17: ("Throttle",     _pct255,                 "%",     100, 0),
     0x14: ("Battery",      lambda x: x * 0.0733,    "V",      16, 0),
     0x15: ("Baro",         lambda x: x * 0.5,       "kPa",   110, 0),
-    0x1A: ("Airflow",      lambda x: x * 6.29,      "Hz",   1600, 0),
-    0x1B: ("Switches",     lambda x: float(x),      "raw",   255, 0),
+    # 0x1A -> RAM 0xF12F. *** THE MAP SENSOR INPUT. PROVEN ON THE CAR
+    # 18/8/26 *** - the strongest evidence tier there is, and it beats every
+    # list and every disassembly argument that came before it.
+    # Shed run 1, one log, two states:
+    #   sensor CONNECTED   -> 0x1A held a constant 138 while the engine was
+    #                         revved 812 -> 5,281 rpm (a stuck sensor)
+    #   sensor UNPLUGGED   -> 0x1A went to 0 the instant the plug came off
+    # An open circuit reading zero is raw-ADC behaviour, so this is the SENSOR
+    # input, not a calculated value. That distinction is the whole point: when
+    # the sensor is unplugged the ECU's calculated load (0x1C) starts MOVING on
+    # its rpm/throttle fallback model, which looks healthy and is not. Only
+    # this channel tells stuck / unplugged / working apart.
+    # Still RAW: no kPa or psi constant is established. To derive one, take two
+    # known points once the sensor is fixed - key-on engine-off (atmospheric,
+    # cross-check against 0x15 baro) and warm idle (strong vacuum) - and solve.
+    0x1A: ("MAP",          lambda x: float(x),      "raw",   255, 0),
+    # 0x1B is TPS Idle Adder per the MUT table - it was never a switch byte,
+    # which is why the P/S bit decode disagreed with the Snap-on. Real switch
+    # and pin state live at 0xA0 sensor pins / 0x9B output pins / 0x9A lights.
+    0x1B: ("TPS Idle Add", lambda x: float(x),      "raw",   255, 0),
     0x1C: ("Engine Load",  lambda x: x * 0.625,     "%",     160, 0),
     0x2F: ("Speed",        lambda x: x * 2.0,       "km/h",  220, 0),
     0x29: ("Inj Pulse",    lambda x: x * 0.256,     "ms",     66, 0),
@@ -395,15 +472,37 @@ ALL_PARAMS = {
     0x12: ("EGR Temp",     _egr_f,                  "°F",    600, 0),
     # --- turbo-oriented (often unused / N/A on NA 4G15) ---
     0x86: ("WG Duty",      _pct255,                 "%",     100, 0),
-    0x38: ("Manifold",     lambda x: x * 0.1935,    "psi",    16, 0),
+    # 0x38 -> RAM 0xF15F. *** DEAD ON THIS ECU. RETRACTED 18/8/26 BY CAR TEST.
+    # The disassembly argument for calling this MAP was good, and it was still
+    # wrong for River's ROM: in shed run 1, 0x38 read flat zero for all 1,315
+    # samples INCLUDING the 87 s when the MAP sensor was connected and
+    # reporting a value the ECU was visibly acting on. A channel that stays
+    # zero while the sensor is live does not carry manifold pressure. Most
+    # likely a boost cell, meaningless on a naturally aspirated engine.
+    # Do not chase this again. Use 0x1A for the sensor, 0x1C for ECU load.
+    0x38: ("38 (dead)",    lambda x: float(x),      "raw",   255, 0),
+    # 0x1D: EvoScan and the traced ROM agree on AccelEnrich / Airflow-per-rev.
+    # MUT_00.txt's "MAP mean" is the odd one out. Shown raw.
+    0x1D: ("AccelEnrich",  lambda x: float(x),      "raw",   255, 0),
+    # 0x4A = the REAL combined switch-flags byte per the traced ROM:
+    # Crank / Idle Position / Power Steering / A/C Switch / Inhibitor.
+    # This is what the old "Switches" gauge on 0x1B was reaching for and
+    # missing - decode THIS byte against the Snap-on, not 0x1B.
+    0x4A: ("Switch Flags",  lambda x: float(x),     "raw",   255, 0),
 }
 
 # Default gauges for CE NA live sessions.
-# 0x38 was trialled as Manifold/MAP but returned a flat 0.0 for a whole
-# running session (21/7/26 on-car) — this ECU does not serve MAP there, so it
-# is OFF by default until the real request ID is found by bench sweep. Octane
-# (0x27, knock-learn) takes the slot: it is meaningful under load.
-DEFAULT_GAUGES = [0x21, 0x06, 0x07, 0x3A, 0x17, 0x14, 0x15, 0x27, 0x1C, 0x2F, 0x29, 0x13]
+# Revised 18/8/26 after live-ROM tracing evidence:
+#  - 0x1A (MAP) replaces 0x38, which the car proved dead on 18/8/26.
+#  - 0x15 Baro sits next to it on purpose: if the MAP is stuck because its
+#    vacuum line is off or blocked it is reading atmosphere, so MAP should sit
+#    at or near baro. Side by side, that comparison is free.
+#  - 0x1C Engine Load is on so the stuck-sensor case is visible: with the
+#    sensor unplugged, load MOVES on the ECU's fallback model while MAP reads
+#    zero. Load moving is not proof of a healthy sensor.
+#  - 0x24 Target Idle and 0x16 ISC Steps show whether the ECU is holding its
+#    idle target or has lost control of the air.
+DEFAULT_GAUGES = [0x21, 0x06, 0x07, 0x3A, 0x17, 0x14, 0x1A, 0x15, 0x1C, 0x24, 0x16, 0x29, 0x13]
 
 # Short notes shown in Settings (scaling provenance / expected range)
 # Service bands: AU CE / Mirage MFI FSM + Autodata 4G15 CE (96–05)
@@ -417,8 +516,8 @@ PARAM_NOTES = {
     0x17: "raw × 100/255  ·  closed TPS adjust 400–1000 mV",
     0x14: "raw × 0.0733  ·  running 13.2–14.8 V  ·  low alt ~12.3 V",
     0x15: "raw × 0.5 kPa  ·  sea level ~100–102",
-    0x1A: "raw × 6.29 Hz (Karman vortex / AFM)",
-    0x1B: "raw switch byte  ·  bit map unknown — toggle A/C / steer at idle and watch the log (Snap-on: P/S was Off while byte non-zero)",
+    0x1A: "MAP SENSOR INPUT — PROVEN ON THE CAR 18/8/26: held 138 with the sensor connected while the engine was revved to 5,281 rpm, and went to 0 the instant it was unplugged. Shown RAW - no kPa/psi constant is established yet. THE TEST that settles a stuck sensor: key-on engine-off, apply vacuum to the sensor port by hand. If this moves, the sensor and wiring are fine and the vacuum line is the fault. If it stays put, the sensor or its wiring is; EvoScan/MitsuLogger call it AirFlow (×6.25–6.29 Hz). Both sources are unofficial. Shown RAW so no wrong conversion is applied. THE TEST: key-on engine-off vs warm idle. If it is MAP the two differ a lot (atmospheric vs vacuum). If it barely moves, it is not MAP on this ECU",
+    0x1B: "TPS Idle Adder (per MUT table)  ·  NOT a switch byte — that was a mislabel, and it is why the old P/S bit decode disagreed with the Snap-on. Switch/pin state lives at 0xA0 sensor pins, 0x9B output pins, 0x9A lights",
     0x1C: "raw × 0.625 %",
     0x2F: "raw × 2  →  km/h (AU metric)",
     0x29: "raw × 0.256 ms  ·  idle often ~2–4 ms",
@@ -432,7 +531,8 @@ PARAM_NOTES = {
     0x16: "idle air stepper position",
     0x12: "−2.7×raw+597.7 °F  ·  if fitted (many AU 4G15 no EGR)",
     0x86: "turbo only — usually N/A on NA CE",
-    0x38: "no data on this ECU — flat 0.0 all session 21/7/26; off by default until real MAP id found",
+    0x38: "DEAD on this ECU — read flat zero for a whole run INCLUDING 87 s with the MAP sensor connected and reporting. Not manifold pressure. Off by default — not the MAP sensor. Flat 0.0 all session 21/7/26 is expected on a car with no EGR. Off by default",
+    0x1D: "Manifold absolute pressure, MEAN  ·  smoothed companion to 0x1A  ·  shown raw",
 }
 
 
@@ -479,14 +579,14 @@ HEALTH_PIDS = frozenset({
 HEALTH_CRITERIA = {
     0x21: "Idle green 650–850 · red if 0 while other data live or >7500",
     0x06: "Idle green 3–18° · base FSM 5±2° with timing link earthed",
-    0x07: "Warm green 80–100°C · red ≤−20 or ≥110 (FSM fault ~−45/140)",
+    0x07: "Warm green 80–100°C · red ≤−20 or ≥110 (FSM fault ~−45/140) · this car is known to run COLD (30–48°C a whole race at Darwin) — that is a real cooling fault holding warm-up enrichment on, not a bad sensor",
     0x3A: "Green −10–60°C typical · red ≤−40 or ≥100 (FSM fault −45/125)",
     0x10: "Same bands as Coolant (ECU-scaled)",
     0x11: "Same bands as Intake Temp (ECU-scaled)",
     0x17: "Closed green 0–12% · WOT green ≥75% · red stuck mid with 0 rpm",
     0x14: "Running green 13.2–14.8 V · red <11.5 or >15.5 · KOEO ~12 OK",
     0x15: "Sea-level green 95–105 kPa · red <80 or >110",
-    0x1A: "MAF idle green ~15–80 Hz (4G93) · red 0 with rpm or ≥1400",
+    0x1A: "MAP raw · must MOVE with throttle and vacuum · stuck on one value while rpm changes = stuck sensor or vacuum line · 0 = unplugged or open circuit",
     0x1C: "Idle green 10–45% · red 0 with rpm or >140%",
     0x2F: "Green 0–200 · red >210 (sensor glitch)",
     0x29: "Idle green 1.5–5.0 ms · red 0 with rpm>400 or >20 ms idle",
@@ -494,11 +594,11 @@ HEALTH_CRITERIA = {
     0x0C: "Green −10…+10% · warn ±10–18 · red beyond ±18",
     0x0D: "Green −10…+10% · warn ±10–18 · red beyond ±18",
     0x0E: "Green −10…+10% · warn ±10–18 · red beyond ±18",
-    0x26: "Green 0–5 · warn 6–15 · red >15 knock events",
+    0x26: "NO KNOCK SENSOR on the 4G15 12V — never green. 0 = nothing listening, not 'no knock'. Warn 6–15 · red >15 if the register ever moves at all",
     0x27: "Learn value · green mid-range · red at extremes 0/255",
     0x24: "Target idle green 600–1100 · red outside 400–1500",
     0x16: "ISC green 0–80 steps warm · red >120",
-    0x38: "no data on this ECU — off by default; find real MAP id by bench sweep",
+    0x38: "dead register on this ECU — always 0, proven on the car 18/8/26",
 }
 
 
@@ -579,21 +679,33 @@ def sensor_health(pid, value, ctx=None, history=None):
         return "warn"
 
     # --- Coolant (raw NTC or scaled) ---
+    #
+    # Corrected 19/8/26. The old band had a hole in it: the "still cold" arm
+    # only fired below 40 C, so anything from 40 C up fell through to the
+    # catch-all and came back GREEN. Darwin round 6 ran 30-48 C for a whole
+    # race — the dashboard would have shown a healthy coolant light for most
+    # of it while the ECU sat in warm-up enrichment the entire time.
+    #
+    # Rule now: while the engine is running, below the FSM warm band is never
+    # green. Amber means "not at operating temperature" — correct during a
+    # normal warm-up, and correct (and visible) when the thermostat or cooling
+    # system is holding the engine cold all race.
     if pid in (0x07, 0x10):
-        if v <= -20 or v >= 110:
+        if v <= -20 or v >= 105:
             return "bad"
-        if v >= 105:
-            return "bad"
-        if warm or (engine_running and cool is not None):
+        if engine_running:
+            # FSM: thermostat opens 82 C, warm operating band 80-100 C
             if 80 <= v <= 100:
                 return "good"
             if 70 <= v < 80 or 100 < v < 105:
                 return "warn"
-            if engine_running and v < 40 and rpm and rpm > 600:
-                # still cold after start — not red immediately
-                return "warn" if v > -10 else "bad"
-        if -10 <= v < 110:
-            return "good" if v < 105 else "warn"
+            # Below 70 C with the engine running: warming up, or running cold.
+            # Either way it is not at operating temperature — never green.
+            return "warn"
+        # Engine off: judge the reading for plausibility only, not for
+        # operating temperature. A cold soak genuinely reads ambient.
+        if -10 <= v < 105:
+            return "good"
         return None
 
     # --- Intake air temp ---
@@ -753,12 +865,20 @@ def sensor_health(pid, value, ctx=None, history=None):
         return "good"
 
     # --- Knock sum ---
+    # NO GREEN LIGHT HERE, EVER. Corrected 19/8/26 after confirming against the
+    # AU 4G15 12V workshop manual that this engine has NO KNOCK SENSOR — the ECU
+    # has zero detonation protection. A zero count therefore proves nothing: it
+    # means nothing is listening, not that the engine is not detonating. Showing
+    # it green was a false all-clear on the one failure mode that melted pistons
+    # 3 and 4. A non-zero count still raises a flag (if the register ever moves,
+    # something is being reported and the operator should know), but silence is
+    # reported as "no information" rather than "healthy".
     if pid == 0x26:
         if v > 15:
             return "bad"
         if v > 5:
             return "warn"
-        return "good"
+        return None
 
     # --- Octane learn ---
     if pid == 0x27:

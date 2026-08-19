@@ -1,0 +1,73 @@
+; OpenPort 2.0 onboard SD logger profile
+; Car: NT43 | River Spitzbarth | Mitsubishi 4G15 12-valve
+; ECU case: MD351552. ROM/calibration identity is not established by logging.
+; This profile is a diagnostic logger only. It does not read, write, flash, or identify the ECU.
+; Scaled coolant/IAT and ECU VSS require car-side validation before interpretation.
+
+type=mut2
+setpinvoltage=1,-2
+
+; High-priority MUT-II requests
+paramname=RPM
+paramid=0x21
+scalingrpn=x,31.25,*
+priority=1
+
+paramname=TPS
+paramid=0x17
+scalingrpn=x,0.39215686,*
+priority=1
+
+paramname=ECU_Load
+paramid=0x1C
+scalingrpn=x,0.625,*
+priority=1
+
+paramname=ECU_TimingAdv
+paramid=0x06
+scalingrpn=x,20,-
+priority=1
+
+paramname=InjPulseWidth_ms
+paramid=0x29
+scalingrpn=x,0.256,*
+priority=1
+
+paramname=NarrowbandO2_V
+paramid=0x13
+scalingrpn=x,0.01952,*
+priority=1
+
+paramname=Battery_V
+paramid=0x14
+scalingrpn=x,0.07333,*
+priority=1
+
+paramname=Coolant_C
+paramid=0x10
+scalingrpn=x,40,-
+priority=1
+
+paramname=IAT_C
+paramid=0x11
+scalingrpn=x,40,-
+priority=1
+
+; ECU VSS only: do not treat as ground speed until independently validated.
+paramname=VSS_ECU_kph
+paramid=0x2F
+scalingrpn=x,2,*
+priority=1
+
+; Raw validation references. These are counts, never Celsius.
+paramname=Coolant_raw07
+paramid=0x07
+priority=2
+
+paramname=IAT_raw3A
+paramid=0x3A
+priority=2
+
+type=calc
+paramname=IDC_pct_approx
+scalingrpn=RPM,InjPulseWidth_ms,*,0.0008333333,*
